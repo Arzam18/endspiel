@@ -261,15 +261,24 @@ unsafe fn apply_rows_scalar(
     subs: &[usize],
     adds: &[usize],
 ) {
-    for i in 0..HIDDEN_SIZE {
-        let mut value = unsafe { *src.add(i) };
+    // Fixed-size tiles with row-wise inner loops: the compiler vectorizes these
+    // (NEON on aarch64), which an element-wise loop over the rows defeats.
+    const TILE: usize = 128;
+    const _: () = assert!(HIDDEN_SIZE.is_multiple_of(TILE));
+    for base in (0..HIDDEN_SIZE).step_by(TILE) {
+        let mut tile = [0i16; TILE];
+        tile.copy_from_slice(unsafe { std::slice::from_raw_parts(src.add(base), TILE) });
         for &row in subs {
-            value = value.wrapping_sub(net.ft_weights[row][i]);
+            for (value, &delta) in tile.iter_mut().zip(&net.ft_weights[row][base..base + TILE]) {
+                *value = value.wrapping_sub(delta);
+            }
         }
         for &row in adds {
-            value = value.wrapping_add(net.ft_weights[row][i]);
+            for (value, &delta) in tile.iter_mut().zip(&net.ft_weights[row][base..base + TILE]) {
+                *value = value.wrapping_add(delta);
+            }
         }
-        unsafe { *dst.add(i) = value };
+        unsafe { std::ptr::copy_nonoverlapping(tile.as_ptr(), dst.add(base), TILE) };
     }
 }
 
