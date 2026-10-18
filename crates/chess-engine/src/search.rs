@@ -2614,9 +2614,8 @@ fn alpha_beta(
             board.side_to_move = board.side_to_move.opposite();
             board.en_passant = None;
 
-            // Null move doesn't change pieces — just copy the accumulator
             if state.use_nnue && ply as usize + 1 < MAX_PLY {
-                state.accumulators[ply as usize + 1] = state.accumulators[ply as usize].clone();
+                update_accumulator_for_null_move(state, board, prev_ep, ply as usize);
             }
 
             let mut null_pv = PvLine::new();
@@ -3769,6 +3768,31 @@ fn update_accumulator_for_move(
     );
 }
 
+/// A null move changes no pieces, but it clears the en-passant square: copy the
+/// accumulator and drop that state feature. Must be called AFTER the null move
+/// is made (`board.en_passant` already cleared).
+fn update_accumulator_for_null_move(
+    state: &mut SearchState,
+    board: &Board,
+    previous_en_passant: Option<Square>,
+    ply: usize,
+) {
+    let (parents, children) = state.accumulators.split_at_mut(ply + 1);
+    let child = &mut children[0];
+    child.clone_from(&parents[ply]);
+    if previous_en_passant.is_some() {
+        child.update_state(
+            &state.net,
+            board.king_square(Color::White),
+            board.king_square(Color::Black),
+            board.castling,
+            previous_en_passant,
+            board.castling,
+            board.en_passant,
+        );
+    }
+}
+
 /// Truncate a PV at the first move that is not legal in the given position.
 /// Stale TT entries can cause the deeper moves in a PV to be illegal.
 fn sanitize_pv(board: &Board, pv: &[Move]) -> Vec<Move> {
@@ -3922,7 +3946,8 @@ mod tests {
     }
 
     /// Mythos–Endspiel, 2026-09-18, after 47.Ke2. With singular extension
-    /// off (forced below), 3M nodes still returns 47...Rh1; 10M finds Rd8.
+    /// off (forced below), 10M nodes still returns 47...Rh1; 15M finds Rd8 (10M did before
+    /// the null-move en-passant accumulator fix).
     #[test]
     #[cfg(not(debug_assertions))]
     fn mythos_endgame_finds_rd8_with_bounded_nodes() {
@@ -3937,7 +3962,7 @@ mod tests {
                 let tt = Arc::new(SharedTT::new(64));
                 let params = SearchParams {
                     max_depth: 32,
-                    max_nodes: Some(10_000_000),
+                    max_nodes: Some(20_000_000),
                     use_nnue: true,
                     contempt: 8,
                     singular_ext_mode: 0,
@@ -3948,11 +3973,50 @@ mod tests {
                 );
                 assert_eq!(result.best_move.to_uci(), "d1d8");
                 // Stop checks are amortized in blocks of 1024 nodes.
-                assert!(result.nodes <= 10_001_024, "{} nodes", result.nodes);
+                assert!(result.nodes <= 20_001_024, "{} nodes", result.nodes);
             })
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn null_move_drops_the_en_passant_state_feature() {
+        // After 1. e4 the en-passant square is e3; the null move clears it.
+        let mut board =
+            Board::from_fen("rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq e3 0 1")
+                .expect("valid test FEN");
+        let net = NnueNetwork::embedded();
+        let tt = Arc::new(SharedTT::new(1));
+        let mut history = PersistentHistory::new();
+        let mut state = SearchState::new(
+            None,
+            None,
+            false,
+            0,
+            0,
+            None,
+            0,
+            0,
+            0,
+            &tt,
+            true,
+            Arc::clone(&net),
+            None,
+            TuneParams::default(),
+            &mut history,
+        );
+        state.accumulators[0].refresh(&board, &net);
+
+        let prev_ep = board.en_passant;
+        board.side_to_move = board.side_to_move.opposite();
+        board.en_passant = None;
+        update_accumulator_for_null_move(&mut state, &board, prev_ep, 0);
+
+        let mut expected = Accumulator::new();
+        expected.refresh(&board, &net);
+        assert_eq!(state.accumulators[1].white, expected.white);
+        assert_eq!(state.accumulators[1].black, expected.black);
     }
 
     fn assert_partial_king_refresh_matches_full(fen: &str, uci: &str) {
