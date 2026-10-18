@@ -221,7 +221,7 @@ tablebases, and ignores `OpeningVariety`.
 
 ## Build from Source
 
-Requires Rust 1.99+.
+Requires Rust 1.99.1+.
 
 ```bash
 cargo build --release
