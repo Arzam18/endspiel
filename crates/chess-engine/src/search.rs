@@ -5,7 +5,7 @@ use std::time::Instant;
 use chess_common::moves::MoveFlag;
 use chess_common::{Board, Color, Move, PieceKind, Score, Square};
 
-use chess_nnue::{Accumulator, NnueNetwork, PieceDelta, nnue_evaluate};
+use chess_nnue::{Accumulator, NnueNetwork, PieceDelta, RefreshCache, nnue_evaluate};
 
 use crate::eval::evaluate;
 use crate::polyglot::OpeningBook;
@@ -223,6 +223,8 @@ struct SearchState<'a> {
     /// Double singular extensions taken on the path from the root to each ply.
     double_exts: [u8; MAX_PLY + 1],
     accumulators: Box<[Accumulator; MAX_PLY]>,
+    /// Refresh cache for king moves; built for `net`.
+    refresh_cache: RefreshCache,
     use_nnue: bool,
     net: Arc<NnueNetwork>,
     lmr_table: [[u8; 64]; 64],
@@ -292,6 +294,7 @@ impl<'a> SearchState<'a> {
             static_evals: [0; MAX_PLY],
             double_exts: [0; MAX_PLY + 1],
             accumulators,
+            refresh_cache: RefreshCache::new(&net),
             use_nnue,
             net,
             lmr_table,
@@ -3656,14 +3659,16 @@ fn evaluate_for_side(board: &Board, state: &mut SearchState, ply: u8) -> i32 {
         // The board is at position P_ply so refresh is valid at this call site.
         let refresh_white = state.accumulators[ply as usize].needs_refresh(Color::White);
         let refresh_black = state.accumulators[ply as usize].needs_refresh(Color::Black);
-        if refresh_white || refresh_black {
-            let net = &state.net;
-            if refresh_white {
-                state.accumulators[ply as usize].refresh_perspective(board, net, Color::White);
-            }
-            if refresh_black {
-                state.accumulators[ply as usize].refresh_perspective(board, net, Color::Black);
-            }
+        let acc = &mut state.accumulators[ply as usize];
+        if refresh_white {
+            state
+                .refresh_cache
+                .refresh(acc, board, &state.net, Color::White);
+        }
+        if refresh_black {
+            state
+                .refresh_cache
+                .refresh(acc, board, &state.net, Color::Black);
         }
         // nnue_evaluate returns score from side-to-move perspective. No HCE
         // endgame scaling on top: trained on WDL-blended targets, the net already

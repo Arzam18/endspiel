@@ -1,4 +1,4 @@
-use chess_common::{Board, CastlingRights, Color, PieceKind, Square};
+use chess_common::{Bitboard, Board, CastlingRights, Color, PieceKind, Square};
 
 use crate::HIDDEN_SIZE;
 use crate::features::{board_state_feature_indices, feature_index, state_feature_indices};
@@ -211,8 +211,35 @@ fn apply_rows(
     net: &NnueNetwork,
     delta: &RowDelta,
 ) {
-    let subs = &delta.sub[..delta.n_sub];
-    let adds = &delta.add[..delta.n_add];
+    let (subs, adds) = (&delta.sub[..delta.n_sub], &delta.add[..delta.n_add]);
+    // SAFETY: distinct borrows, both HIDDEN_SIZE long.
+    unsafe { apply_rows_raw(dst.as_mut_ptr(), src.as_ptr(), net, subs, adds) }
+}
+
+/// In-place form of [`apply_rows`] (`values -= subs; values += adds`).
+#[inline]
+fn apply_rows_in_place(
+    values: &mut [i16; HIDDEN_SIZE],
+    net: &NnueNetwork,
+    subs: &[usize],
+    adds: &[usize],
+) {
+    let ptr = values.as_mut_ptr();
+    // SAFETY: the kernels load each element before they store it.
+    unsafe { apply_rows_raw(ptr, ptr, net, subs, adds) }
+}
+
+/// # Safety
+/// `dst` and `src` must each be valid for HIDDEN_SIZE elements; they may be
+/// equal but must not otherwise overlap.
+#[inline]
+unsafe fn apply_rows_raw(
+    dst: *mut i16,
+    src: *const i16,
+    net: &NnueNetwork,
+    subs: &[usize],
+    adds: &[usize],
+) {
     #[cfg(target_arch = "x86_64")]
     unsafe {
         match simd_backend() {
@@ -223,27 +250,26 @@ fn apply_rows(
             SimdBackend::Scalar | SimdBackend::Neon => {}
         }
     }
-    apply_rows_scalar(dst, src, net, subs, adds);
+    unsafe { apply_rows_scalar(dst, src, net, subs, adds) }
 }
 
 #[inline]
-fn apply_rows_scalar(
-    dst: &mut [i16; HIDDEN_SIZE],
-    src: &[i16; HIDDEN_SIZE],
+unsafe fn apply_rows_scalar(
+    dst: *mut i16,
+    src: *const i16,
     net: &NnueNetwork,
     subs: &[usize],
     adds: &[usize],
 ) {
-    *dst = *src;
-    for &row in subs {
-        for (value, &delta) in dst.iter_mut().zip(&net.ft_weights[row]) {
-            *value = value.wrapping_sub(delta);
+    for i in 0..HIDDEN_SIZE {
+        let mut value = unsafe { *src.add(i) };
+        for &row in subs {
+            value = value.wrapping_sub(net.ft_weights[row][i]);
         }
-    }
-    for &row in adds {
-        for (value, &delta) in dst.iter_mut().zip(&net.ft_weights[row]) {
-            *value = value.wrapping_add(delta);
+        for &row in adds {
+            value = value.wrapping_add(net.ft_weights[row][i]);
         }
+        unsafe { *dst.add(i) = value };
     }
 }
 
@@ -256,8 +282,8 @@ macro_rules! simd_apply_rows {
     ($name:ident, $feature:literal, $vector:ty, $load:ident, $store:ident, $add:ident, $sub:ident, $lanes:expr) => {
         #[target_feature(enable = $feature)]
         unsafe fn $name(
-            dst: &mut [i16; HIDDEN_SIZE],
-            src: &[i16; HIDDEN_SIZE],
+            dst: *mut i16,
+            src: *const i16,
             net: &NnueNetwork,
             subs: &[usize],
             adds: &[usize],
@@ -268,9 +294,10 @@ macro_rules! simd_apply_rows {
             unsafe {
                 let mut base = 0;
                 while base < HIDDEN_SIZE {
-                    let mut regs: [$vector; APPLY_TILE_REGS] = std::array::from_fn(|k| {
-                        $load(src.as_ptr().add(base + k * $lanes) as *const $vector)
-                    });
+                    let mut regs: [$vector; APPLY_TILE_REGS] =
+                        std::array::from_fn(
+                            |k| $load(src.add(base + k * $lanes) as *const $vector),
+                        );
                     for &row in subs {
                         let row = net.ft_weights[row].as_ptr().add(base);
                         for (k, reg) in regs.iter_mut().enumerate() {
@@ -284,10 +311,7 @@ macro_rules! simd_apply_rows {
                         }
                     }
                     for (k, reg) in regs.iter().enumerate() {
-                        $store(
-                            dst.as_mut_ptr().add(base + k * $lanes) as *mut $vector,
-                            *reg,
-                        );
+                        $store(dst.add(base + k * $lanes) as *mut $vector, *reg);
                     }
                     base += TILE;
                 }
@@ -355,6 +379,99 @@ impl PieceDelta {
     pub fn add(&mut self, color: Color, kind: PieceKind, sq: Square) {
         self.added[self.n_added] = (color, kind, sq);
         self.n_added += 1;
+    }
+}
+
+/// Last accumulator seen for one (perspective, own king square): the feature
+/// rows depend only on that king square, so a refresh can start from here and
+/// apply the pieces that differ instead of summing every piece from the biases.
+struct CacheEntry {
+    values: [i16; HIDDEN_SIZE],
+    pieces: [[u64; PieceKind::COUNT]; 2],
+    state: Option<[usize; 3]>,
+}
+
+/// Accumulator refresh cache ("Finny table"), one entry per perspective and own
+/// king square. Bound to the net it was built for.
+pub struct RefreshCache {
+    entries: Box<[CacheEntry]>,
+}
+
+impl RefreshCache {
+    pub fn new(net: &NnueNetwork) -> Self {
+        let entries = (0..2 * 64)
+            .map(|_| CacheEntry {
+                values: *net.ft_biases,
+                pieces: [[0; PieceKind::COUNT]; 2],
+                state: None,
+            })
+            .collect();
+        Self { entries }
+    }
+
+    /// Same result as [`Accumulator::refresh_perspective`] (wrapping i16 sums
+    /// are order-independent), at the cost of the pieces that changed since
+    /// this king square was last refreshed.
+    pub fn refresh(
+        &mut self,
+        acc: &mut Accumulator,
+        board: &Board,
+        net: &NnueNetwork,
+        perspective: Color,
+    ) {
+        let white_king = board.king_square(Color::White);
+        let black_king = board.king_square(Color::Black);
+        let own_king = match perspective {
+            Color::White => white_king,
+            Color::Black => black_king,
+        };
+        let entry = &mut self.entries[perspective.index() * 64 + own_king.index()];
+
+        // 32 pieces + 3 state features at most, on a cold entry
+        let mut subs = [0usize; 35];
+        let mut adds = [0usize; 35];
+        let (mut n_sub, mut n_add) = (0, 0);
+        for &color in &[Color::White, Color::Black] {
+            for &kind in &PieceKind::ALL {
+                let now = board.pieces[color.index()][kind.index()].0;
+                let cached = &mut entry.pieces[color.index()][kind.index()];
+                for sq in Bitboard(*cached & !now).iter() {
+                    subs[n_sub] =
+                        feature_index(perspective, white_king, black_king, color, kind, sq);
+                    n_sub += 1;
+                }
+                for sq in Bitboard(now & !*cached).iter() {
+                    adds[n_add] =
+                        feature_index(perspective, white_king, black_king, color, kind, sq);
+                    n_add += 1;
+                }
+                *cached = now;
+            }
+        }
+        let state = board_state_feature_indices(board, perspective);
+        for (k, &index) in state.iter().enumerate() {
+            match entry.state {
+                Some(old) if old[k] == index => {}
+                Some(old) => {
+                    subs[n_sub] = old[k];
+                    n_sub += 1;
+                    adds[n_add] = index;
+                    n_add += 1;
+                }
+                None => {
+                    adds[n_add] = index;
+                    n_add += 1;
+                }
+            }
+        }
+        entry.state = Some(state);
+
+        apply_rows_in_place(&mut entry.values, net, &subs[..n_sub], &adds[..n_add]);
+        match perspective {
+            Color::White => acc.white = entry.values,
+            Color::Black => acc.black = entry.values,
+        }
+        acc.needs_refresh[perspective.index()] = false;
     }
 }
 
@@ -776,7 +893,7 @@ mod tests {
         let src: [i16; HIDDEN_SIZE] = std::array::from_fn(|i| (i as i16 % 97) - 48);
         let (subs, adds) = ([5usize, 900, 12_000], [77usize, 25_000]);
         let mut expected = [0i16; HIDDEN_SIZE];
-        apply_rows_scalar(&mut expected, &src, &net, &subs, &adds);
+        unsafe { apply_rows_scalar(expected.as_mut_ptr(), src.as_ptr(), &net, &subs, &adds) };
         let mut delta = RowDelta::default();
         subs.iter().for_each(|&row| delta.sub(row));
         adds.iter().for_each(|&row| delta.add(row));
@@ -787,9 +904,41 @@ mod tests {
         {
             if is_x86_feature_detected!("avx2") {
                 let mut actual = [0i16; HIDDEN_SIZE];
-                unsafe { apply_rows_avx2(&mut actual, &src, &net, &subs, &adds) };
+                unsafe { apply_rows_avx2(actual.as_mut_ptr(), src.as_ptr(), &net, &subs, &adds) };
                 assert_eq!(actual, expected);
             }
+            let mut in_place = src;
+            apply_rows_in_place(&mut in_place, &net, &subs, &adds);
+            assert_eq!(in_place, expected);
+        }
+    }
+
+    #[test]
+    fn refresh_cache_matches_full_refresh() {
+        let net = NnueNetwork::embedded();
+        let mut cache = RefreshCache::new(&net);
+        // Same and different king squares, captures, castling and en-passant
+        // changes, revisiting cached squares in between.
+        let fens = [
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3",
+            "r3k2r/ppp2ppp/2n5/3q4/8/2N5/PPP2PPP/R3K2R b Qk - 0 9",
+            "6k1/5ppp/8/8/8/8/5PPP/6K1 w - - 0 40",
+            "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "4k3/8/8/8/8/8/8/R3K2R w KQ - 0 1",
+            "2kr3r/ppp2ppp/8/8/8/8/PPP2PPP/2KR3R w - - 4 12",
+            "6k1/5ppp/8/8/8/8/5PPP/6K1 w - - 0 40",
+        ];
+        for fen in fens {
+            let board = Board::from_fen(fen).unwrap();
+            let mut expected = Accumulator::new();
+            expected.refresh(&board, &net);
+            let mut actual = Accumulator::new();
+            cache.refresh(&mut actual, &board, &net, Color::White);
+            cache.refresh(&mut actual, &board, &net, Color::Black);
+            assert_eq!(actual.white, expected.white, "{fen}");
+            assert_eq!(actual.black, expected.black, "{fen}");
+            assert!(!actual.needs_refresh(Color::White) && !actual.needs_refresh(Color::Black));
         }
     }
 
