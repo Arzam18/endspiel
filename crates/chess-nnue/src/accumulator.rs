@@ -177,6 +177,187 @@ simd_replace_row!(
     16
 );
 
+/// Feature rows one move removes from and adds to a perspective: up to three
+/// pieces (mover, captured piece, castling rook) plus three state features.
+#[derive(Default)]
+struct RowDelta {
+    sub: [usize; 6],
+    add: [usize; 6],
+    n_sub: usize,
+    n_add: usize,
+}
+
+impl RowDelta {
+    #[inline]
+    fn sub(&mut self, row: usize) {
+        self.sub[self.n_sub] = row;
+        self.n_sub += 1;
+    }
+
+    #[inline]
+    fn add(&mut self, row: usize) {
+        self.add[self.n_add] = row;
+        self.n_add += 1;
+    }
+}
+
+/// `dst = src - Σ sub rows + Σ add rows` in a single pass. Replaces a copy plus
+/// one read-modify-write pass over the accumulator per changed feature; i16
+/// lanes wrap, so the result is bit-identical to the sequential updates.
+#[inline]
+fn apply_rows(
+    dst: &mut [i16; HIDDEN_SIZE],
+    src: &[i16; HIDDEN_SIZE],
+    net: &NnueNetwork,
+    delta: &RowDelta,
+) {
+    let subs = &delta.sub[..delta.n_sub];
+    let adds = &delta.add[..delta.n_add];
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        match simd_backend() {
+            SimdBackend::Avx512Icl | SimdBackend::Avx512 => {
+                return apply_rows_avx512(dst, src, net, subs, adds);
+            }
+            SimdBackend::Avx2 => return apply_rows_avx2(dst, src, net, subs, adds),
+            SimdBackend::Scalar | SimdBackend::Neon => {}
+        }
+    }
+    apply_rows_scalar(dst, src, net, subs, adds);
+}
+
+#[inline]
+fn apply_rows_scalar(
+    dst: &mut [i16; HIDDEN_SIZE],
+    src: &[i16; HIDDEN_SIZE],
+    net: &NnueNetwork,
+    subs: &[usize],
+    adds: &[usize],
+) {
+    *dst = *src;
+    for &row in subs {
+        for (value, &delta) in dst.iter_mut().zip(&net.ft_weights[row]) {
+            *value = value.wrapping_sub(delta);
+        }
+    }
+    for &row in adds {
+        for (value, &delta) in dst.iter_mut().zip(&net.ft_weights[row]) {
+            *value = value.wrapping_add(delta);
+        }
+    }
+}
+
+/// Registers per tile: the tile stays in registers while every row is applied.
+#[cfg(target_arch = "x86_64")]
+const APPLY_TILE_REGS: usize = 8;
+
+#[cfg(target_arch = "x86_64")]
+macro_rules! simd_apply_rows {
+    ($name:ident, $feature:literal, $vector:ty, $load:ident, $store:ident, $add:ident, $sub:ident, $lanes:expr) => {
+        #[target_feature(enable = $feature)]
+        unsafe fn $name(
+            dst: &mut [i16; HIDDEN_SIZE],
+            src: &[i16; HIDDEN_SIZE],
+            net: &NnueNetwork,
+            subs: &[usize],
+            adds: &[usize],
+        ) {
+            use std::arch::x86_64::*;
+            const TILE: usize = APPLY_TILE_REGS * $lanes;
+            const _: () = assert!(HIDDEN_SIZE % TILE == 0);
+            unsafe {
+                let mut base = 0;
+                while base < HIDDEN_SIZE {
+                    let mut regs: [$vector; APPLY_TILE_REGS] = std::array::from_fn(|k| {
+                        $load(src.as_ptr().add(base + k * $lanes) as *const $vector)
+                    });
+                    for &row in subs {
+                        let row = net.ft_weights[row].as_ptr().add(base);
+                        for (k, reg) in regs.iter_mut().enumerate() {
+                            *reg = $sub(*reg, $load(row.add(k * $lanes) as *const $vector));
+                        }
+                    }
+                    for &row in adds {
+                        let row = net.ft_weights[row].as_ptr().add(base);
+                        for (k, reg) in regs.iter_mut().enumerate() {
+                            *reg = $add(*reg, $load(row.add(k * $lanes) as *const $vector));
+                        }
+                    }
+                    for (k, reg) in regs.iter().enumerate() {
+                        $store(
+                            dst.as_mut_ptr().add(base + k * $lanes) as *mut $vector,
+                            *reg,
+                        );
+                    }
+                    base += TILE;
+                }
+            }
+        }
+    };
+}
+
+#[cfg(target_arch = "x86_64")]
+simd_apply_rows!(
+    apply_rows_avx512,
+    "avx512f,avx512bw",
+    __m512i,
+    _mm512_loadu_si512,
+    _mm512_storeu_si512,
+    _mm512_add_epi16,
+    _mm512_sub_epi16,
+    32
+);
+#[cfg(target_arch = "x86_64")]
+simd_apply_rows!(
+    apply_rows_avx2,
+    "avx2",
+    __m256i,
+    _mm256_loadu_si256,
+    _mm256_storeu_si256,
+    _mm256_add_epi16,
+    _mm256_sub_epi16,
+    16
+);
+
+/// Pieces a move removes and adds, in board terms; [`Accumulator::update_from`]
+/// turns them into feature rows per perspective.
+pub struct PieceDelta {
+    removed: [(Color, PieceKind, Square); 3],
+    added: [(Color, PieceKind, Square); 2],
+    n_removed: usize,
+    n_added: usize,
+}
+
+impl Default for PieceDelta {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PieceDelta {
+    pub const fn new() -> Self {
+        const NONE: (Color, PieceKind, Square) = (Color::White, PieceKind::Pawn, Square::A1);
+        Self {
+            removed: [NONE; 3],
+            added: [NONE; 2],
+            n_removed: 0,
+            n_added: 0,
+        }
+    }
+
+    #[inline]
+    pub fn remove(&mut self, color: Color, kind: PieceKind, sq: Square) {
+        self.removed[self.n_removed] = (color, kind, sq);
+        self.n_removed += 1;
+    }
+
+    #[inline]
+    pub fn add(&mut self, color: Color, kind: PieceKind, sq: Square) {
+        self.added[self.n_added] = (color, kind, sq);
+        self.n_added += 1;
+    }
+}
+
 /// NNUE accumulator holding feature-transformed values for both perspectives.
 ///
 /// `needs_refresh` is set to true when the accumulator is stale (e.g. after a
@@ -221,6 +402,83 @@ impl Accumulator {
     }
 
     /// Full recompute from scratch using the board state.
+    /// Child accumulator for a move: copies the parent's refresh flags, marks
+    /// `invalidate` dirty (the mover's perspective after a king move), and
+    /// writes `parent − removed + added` (pieces and changed state features)
+    /// for every clean perspective in one pass. Same result as
+    /// [`copy_clean_from`](Self::copy_clean_from) + [`update_state`](Self::update_state)
+    /// + [`sub_piece`](Self::sub_piece) / [`add_piece`](Self::add_piece).
+    #[allow(clippy::too_many_arguments)]
+    pub fn update_from(
+        &mut self,
+        parent: &Self,
+        net: &NnueNetwork,
+        invalidate: Option<Color>,
+        white_king: Square,
+        black_king: Square,
+        pieces: &PieceDelta,
+        old_castling: CastlingRights,
+        old_en_passant: Option<Square>,
+        new_castling: CastlingRights,
+        new_en_passant: Option<Square>,
+    ) {
+        self.needs_refresh = parent.needs_refresh;
+        if let Some(color) = invalidate {
+            self.mark_refresh(color);
+        }
+        for perspective in [Color::White, Color::Black] {
+            if self.needs_refresh(perspective) {
+                continue;
+            }
+            let mut delta = RowDelta::default();
+            let old = state_feature_indices(
+                perspective,
+                white_king,
+                black_king,
+                old_castling,
+                old_en_passant,
+            );
+            let new = state_feature_indices(
+                perspective,
+                white_king,
+                black_king,
+                new_castling,
+                new_en_passant,
+            );
+            for (old_index, new_index) in old.into_iter().zip(new) {
+                if old_index != new_index {
+                    delta.sub(old_index);
+                    delta.add(new_index);
+                }
+            }
+            for &(color, kind, sq) in &pieces.removed[..pieces.n_removed] {
+                delta.sub(feature_index(
+                    perspective,
+                    white_king,
+                    black_king,
+                    color,
+                    kind,
+                    sq,
+                ));
+            }
+            for &(color, kind, sq) in &pieces.added[..pieces.n_added] {
+                delta.add(feature_index(
+                    perspective,
+                    white_king,
+                    black_king,
+                    color,
+                    kind,
+                    sq,
+                ));
+            }
+            let (dst, src) = match perspective {
+                Color::White => (&mut self.white, &parent.white),
+                Color::Black => (&mut self.black, &parent.black),
+            };
+            apply_rows(dst, src, net, &delta);
+        }
+    }
+
     pub fn refresh(&mut self, board: &Board, net: &NnueNetwork) {
         self.refresh_perspective(board, net, Color::White);
         self.refresh_perspective(board, net, Color::Black);
@@ -433,6 +691,106 @@ mod tests {
         }
         replace_row(&mut actual, &row, &replacement);
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn fused_update_matches_sequential_updates() {
+        let net = NnueNetwork::embedded();
+        let board = Board::starting_position();
+        let mut parent = Accumulator::new();
+        parent.refresh(&board, &net);
+        let (white_king, black_king) = (Square::E1, Square::E8);
+        let (old_castling, new_castling) = (board.castling, CastlingRights::NONE);
+        let (old_ep, new_ep) = (None, Some(Square::new(3, 5)));
+        // A capture with a castling-rook move and every state feature changing.
+        let removed = [
+            (Color::White, PieceKind::Knight, Square::new(6, 0)),
+            (Color::Black, PieceKind::Pawn, Square::new(4, 6)),
+            (Color::White, PieceKind::Rook, Square::H1),
+        ];
+        let added = [
+            (Color::White, PieceKind::Knight, Square::new(4, 6)),
+            (Color::White, PieceKind::Rook, Square::F1),
+        ];
+        let mut pieces = PieceDelta::new();
+        removed
+            .iter()
+            .for_each(|&(c, k, sq)| pieces.remove(c, k, sq));
+        added.iter().for_each(|&(c, k, sq)| pieces.add(c, k, sq));
+
+        for (dirty, invalidate) in [
+            (None, None),
+            (Some(Color::White), None),
+            (None, Some(Color::Black)),
+        ] {
+            let mut parent = parent.clone();
+            if let Some(color) = dirty {
+                parent.mark_refresh(color);
+            }
+            let mut expected = Accumulator::new();
+            expected.copy_clean_from(&parent, invalidate);
+            expected.update_state(
+                &net,
+                white_king,
+                black_king,
+                old_castling,
+                old_ep,
+                new_castling,
+                new_ep,
+            );
+            for &(c, k, sq) in &removed {
+                expected.sub_piece(&net, white_king, black_king, c, k, sq);
+            }
+            for &(c, k, sq) in &added {
+                expected.add_piece(&net, white_king, black_king, c, k, sq);
+            }
+            let mut actual = Accumulator::new();
+            actual.update_from(
+                &parent,
+                &net,
+                invalidate,
+                white_king,
+                black_king,
+                &pieces,
+                old_castling,
+                old_ep,
+                new_castling,
+                new_ep,
+            );
+            assert_eq!(actual.needs_refresh, expected.needs_refresh);
+            for perspective in [Color::White, Color::Black] {
+                if !expected.needs_refresh(perspective) {
+                    let (a, e) = match perspective {
+                        Color::White => (&actual.white, &expected.white),
+                        Color::Black => (&actual.black, &expected.black),
+                    };
+                    assert_eq!(a, e);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dispatched_apply_rows_match_scalar() {
+        let net = NnueNetwork::embedded();
+        let src: [i16; HIDDEN_SIZE] = std::array::from_fn(|i| (i as i16 % 97) - 48);
+        let (subs, adds) = ([5usize, 900, 12_000], [77usize, 25_000]);
+        let mut expected = [0i16; HIDDEN_SIZE];
+        apply_rows_scalar(&mut expected, &src, &net, &subs, &adds);
+        let mut delta = RowDelta::default();
+        subs.iter().for_each(|&row| delta.sub(row));
+        adds.iter().for_each(|&row| delta.add(row));
+        let mut actual = [0i16; HIDDEN_SIZE];
+        apply_rows(&mut actual, &src, &net, &delta);
+        assert_eq!(actual, expected);
+        #[cfg(target_arch = "x86_64")]
+        {
+            if is_x86_feature_detected!("avx2") {
+                let mut actual = [0i16; HIDDEN_SIZE];
+                unsafe { apply_rows_avx2(&mut actual, &src, &net, &subs, &adds) };
+                assert_eq!(actual, expected);
+            }
+        }
     }
 
     #[test]

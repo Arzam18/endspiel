@@ -23,7 +23,7 @@ pub const OUTPUT_BUCKETS: usize = 8;
 pub const FT_QUANT: i32 = 127; // activation quantization (QA)
 pub const NET_QUANT: i32 = 64; // dense-layer weight quantization (QB)
 
-pub use accumulator::Accumulator;
+pub use accumulator::{Accumulator, PieceDelta};
 pub use inference::nnue_evaluate;
 pub use inference::{SimdBackend, simd_backend};
 pub use network::NnueNetwork;

@@ -5,7 +5,7 @@ use std::time::Instant;
 use chess_common::moves::MoveFlag;
 use chess_common::{Board, Color, Move, PieceKind, Score, Square};
 
-use chess_nnue::{Accumulator, NnueNetwork, nnue_evaluate};
+use chess_nnue::{Accumulator, NnueNetwork, PieceDelta, nnue_evaluate};
 
 use crate::eval::evaluate;
 use crate::polyglot::OpeningBook;
@@ -3720,53 +3720,20 @@ fn update_accumulator_for_move(
             .unwrap_or(PieceKind::Pawn)
     };
 
-    // Parent and child occupy distinct slots. Copy only perspectives that
-    // remain valid after this move, leaving dirty values for lazy refresh.
-    debug_assert!(src_ply < dst_ply);
-    let (parents, children) = state.accumulators.split_at_mut(dst_ply);
-    let acc = &mut children[0];
-    acc.copy_clean_from(
-        &parents[src_ply],
-        (moving_kind == PieceKind::King).then_some(us),
-    );
-    let white_king = board.king_square(Color::White);
-    let black_king = board.king_square(Color::Black);
-    let net = &state.net;
-
-    acc.update_state(
-        net,
-        white_king,
-        black_king,
-        previous_castling,
-        previous_en_passant,
-        board.castling,
-        board.en_passant,
-    );
-
-    // Remove piece from source square
-    acc.sub_piece(net, white_king, black_king, us, moving_kind, from);
-
-    // Handle capture: remove captured piece
+    // Pieces the move removes and adds. Castling also moves a rook: the
+    // opponent perspective stays clean across a king move and needs it.
+    let mut pieces = PieceDelta::new();
+    pieces.remove(us, moving_kind, from);
     if let Some(cap) = captured {
-        if flag == MoveFlag::EnPassant {
-            // En passant: captured pawn is on the same file as `to`, same rank as `from`
-            let cap_sq = Square::new(to.file(), from.rank());
-            acc.sub_piece(net, white_king, black_king, cap.color, cap.kind, cap_sq);
+        // En passant: the captured pawn is on the file of `to`, rank of `from`
+        let cap_sq = if flag == MoveFlag::EnPassant {
+            Square::new(to.file(), from.rank())
         } else {
-            acc.sub_piece(net, white_king, black_king, cap.color, cap.kind, to);
-        }
+            to
+        };
+        pieces.remove(cap.color, cap.kind, cap_sq);
     }
-
-    // Add piece to destination square (promoted piece if promotion, else moving piece)
-    if let Some(promo) = flag.promotion_piece() {
-        acc.add_piece(net, white_king, black_king, us, promo, to);
-    } else {
-        acc.add_piece(net, white_king, black_king, us, moving_kind, to);
-    }
-
-    // Castling also moves a rook. Previously every king move forced a full
-    // two-perspective refresh, which hid this delta; the opponent perspective
-    // now stays clean and must receive it explicitly.
+    pieces.add(us, flag.promotion_piece().unwrap_or(moving_kind), to);
     let rook_move = match (flag, us) {
         (MoveFlag::KingsideCastle, Color::White) => Some((Square::H1, Square::F1)),
         (MoveFlag::KingsideCastle, Color::Black) => Some((Square::H8, Square::F8)),
@@ -3775,9 +3742,26 @@ fn update_accumulator_for_move(
         _ => None,
     };
     if let Some((rook_from, rook_to)) = rook_move {
-        acc.sub_piece(net, white_king, black_king, us, PieceKind::Rook, rook_from);
-        acc.add_piece(net, white_king, black_king, us, PieceKind::Rook, rook_to);
+        pieces.remove(us, PieceKind::Rook, rook_from);
+        pieces.add(us, PieceKind::Rook, rook_to);
     }
+
+    // Parent and child occupy distinct slots. Only perspectives that remain
+    // valid after this move are written; dirty ones wait for lazy refresh.
+    debug_assert!(src_ply < dst_ply);
+    let (parents, children) = state.accumulators.split_at_mut(dst_ply);
+    children[0].update_from(
+        &parents[src_ply],
+        &state.net,
+        (moving_kind == PieceKind::King).then_some(us),
+        board.king_square(Color::White),
+        board.king_square(Color::Black),
+        &pieces,
+        previous_castling,
+        previous_en_passant,
+        board.castling,
+        board.en_passant,
+    );
 }
 
 /// Truncate a PV at the first move that is not legal in the given position.
