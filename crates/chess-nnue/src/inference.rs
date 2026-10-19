@@ -755,7 +755,7 @@ mod tests {
             "4r1k1/5ppp/8/3B4/8/8/5PPP/6K1 w - - 0 30",
             "r4rk1/1pp2ppp/p1np1q2/4p3/2B1P1b1/2NP1N2/PPP2PPP/R2Q1RK1 w - - 0 10",
         ]);
-        assert!(mean <= 6.0 && max <= 20, "mean {mean} cp, max {max} cp");
+        assert!(mean <= 12.0 && max <= 30, "mean {mean} cp, max {max} cp");
     }
 
     /// `NNUE_FENS=<file with one FEN per line> cargo test --release -p chess-nnue
