@@ -23,18 +23,34 @@ pub const HEADER_SIZE: usize = 32;
 ///
 /// `l1_size` / `l2_size` come from the header. Production nets use 16/32;
 /// trial nets may use any value up to [`MAX_L1_SIZE`] / [`MAX_L2_SIZE`].
+///
+/// L1 weights are stored for the sparse L1 (see [`L1Block`]), not in file order.
 pub struct NnueNetwork {
     pub l1_size: usize,
     pub l2_size: usize,
     pub ft_weights: Box<[[i16; HIDDEN_SIZE]; INPUT_SIZE]>,
     pub ft_biases: Box<[i16; HIDDEN_SIZE]>,
-    pub l1_weights: Box<[[i8; PAIR_INPUT_SIZE]]>,
+    pub l1_weights: Box<[L1Block]>,
     pub l1_biases: Box<[i32]>,
     pub l2_weights: Box<[i8]>,
     pub l2_biases: Box<[i32]>,
     pub l3_weights: Box<[i8]>,
     pub l3_biases: [i32; OUTPUT_BUCKETS],
 }
+
+/// L1 inputs per chunk: the sparse L1 skips the input in 4-byte chunks.
+pub const L1_CHUNK: usize = 4;
+pub const L1_CHUNKS: usize = PAIR_INPUT_SIZE / L1_CHUNK;
+/// L1 neurons per weight block.
+pub const L1_BLOCK: usize = 16;
+
+/// L1 weights of one input chunk for [`L1_BLOCK`] neurons, neuron-major
+/// (`[neuron][input]`): the i8 operand of one u8×i8 dot-product step that adds
+/// a chunk's 4 inputs to 16 neuron sums. Layout per net:
+/// `[bucket][neuron block][chunk]`, neurons past `l1_size` zero.
+#[derive(Clone, Copy)]
+#[repr(C, align(64))]
+pub struct L1Block(pub [i8; L1_CHUNK * L1_BLOCK]);
 
 pub const fn net_file_size(input_size: usize, l1: usize, l2: usize) -> usize {
     HEADER_SIZE
@@ -158,12 +174,19 @@ impl NnueNetwork {
             *value = read_i16(&mut offset);
         }
 
+        let l1_blocks = l1_size.div_ceil(L1_BLOCK);
         let mut l1_weights =
-            vec![[0i8; PAIR_INPUT_SIZE]; OUTPUT_BUCKETS * l1_size].into_boxed_slice();
-        for row in l1_weights.iter_mut() {
-            for value in row.iter_mut() {
-                *value = data[offset] as i8;
-                offset += 1;
+            vec![L1Block([0; L1_CHUNK * L1_BLOCK]); OUTPUT_BUCKETS * l1_blocks * L1_CHUNKS]
+                .into_boxed_slice();
+        for bucket in 0..OUTPUT_BUCKETS {
+            for neuron in 0..l1_size {
+                let blocks = (bucket * l1_blocks + neuron / L1_BLOCK) * L1_CHUNKS;
+                let lane = neuron % L1_BLOCK * L1_CHUNK;
+                for input in 0..PAIR_INPUT_SIZE {
+                    l1_weights[blocks + input / L1_CHUNK].0[lane + input % L1_CHUNK] =
+                        data[offset] as i8;
+                    offset += 1;
+                }
             }
         }
         let mut l1_biases = vec![0i32; OUTPUT_BUCKETS * l1_size].into_boxed_slice();
@@ -206,9 +229,17 @@ impl NnueNetwork {
         })
     }
 
+    /// The [`L1_CHUNKS`] weight blocks of L1 neurons `block * L1_BLOCK..` in `bucket`.
     #[inline]
-    pub fn l1_row(&self, bucket: usize, neuron: usize) -> &[i8; PAIR_INPUT_SIZE] {
-        &self.l1_weights[bucket * self.l1_size + neuron]
+    pub fn l1_blocks(&self, bucket: usize, block: usize) -> &[L1Block] {
+        let start = (bucket * self.l1_size.div_ceil(L1_BLOCK) + block) * L1_CHUNKS;
+        &self.l1_weights[start..start + L1_CHUNKS]
+    }
+
+    /// One L1 weight, as stored in the net file.
+    pub fn l1_weight(&self, bucket: usize, neuron: usize, input: usize) -> i8 {
+        self.l1_blocks(bucket, neuron / L1_BLOCK)[input / L1_CHUNK].0
+            [neuron % L1_BLOCK * L1_CHUNK + input % L1_CHUNK]
     }
 
     #[inline]
@@ -313,9 +344,54 @@ mod tests {
         let net = NnueNetwork::from_bytes(&bytes).unwrap();
         assert_eq!(net.l1_size, 32);
         assert_eq!(net.l2_size, 64);
-        assert_eq!(net.l1_row(0, 0).len(), PAIR_INPUT_SIZE);
+        assert_eq!(net.l1_blocks(0, 1).len(), L1_CHUNKS);
         assert_eq!(net.l2_row(0, 0).len(), 32);
         assert_eq!(net.l3_row(0).len(), 64);
+    }
+
+    #[test]
+    fn l1_blocks_hold_the_file_order_weights() {
+        // 20 neurons: one full block of 16 and one zero-padded block
+        let (l1, l2) = (20usize, 8usize);
+        let mut bytes = vec![0u8; net_file_size(INPUT_SIZE, l1, l2)];
+        bytes[..8].copy_from_slice(NET_MAGIC);
+        for (idx, value) in [NET_VERSION, INPUT_SIZE as u32, HIDDEN_SIZE as u32]
+            .into_iter()
+            .chain([OUTPUT_BUCKETS as u32, l1 as u32, l2 as u32])
+            .enumerate()
+        {
+            bytes[8 + idx * 4..12 + idx * 4].copy_from_slice(&value.to_le_bytes());
+        }
+        let weight = |bucket: usize, neuron: usize, input: usize| {
+            ((bucket * 31 + neuron * 7 + input * 3) % 251) as u8 as i8
+        };
+        let mut offset = HEADER_SIZE + (INPUT_SIZE + 1) * HIDDEN_SIZE * 2;
+        for bucket in 0..OUTPUT_BUCKETS {
+            for neuron in 0..l1 {
+                for input in 0..PAIR_INPUT_SIZE {
+                    bytes[offset] = weight(bucket, neuron, input) as u8;
+                    offset += 1;
+                }
+            }
+        }
+        let net = NnueNetwork::from_bytes(&bytes).unwrap();
+        for bucket in 0..OUTPUT_BUCKETS {
+            for neuron in 0..l1 {
+                for input in 0..PAIR_INPUT_SIZE {
+                    assert_eq!(
+                        net.l1_weight(bucket, neuron, input),
+                        weight(bucket, neuron, input)
+                    );
+                }
+            }
+            for block in net.l1_blocks(bucket, 1) {
+                assert!(
+                    block.0[(l1 - L1_BLOCK) * L1_CHUNK..]
+                        .iter()
+                        .all(|&w| w == 0)
+                );
+            }
+        }
     }
 
     #[test]

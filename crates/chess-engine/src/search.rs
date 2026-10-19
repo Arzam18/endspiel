@@ -3946,8 +3946,8 @@ mod tests {
     }
 
     /// Mythos–Endspiel, 2026-09-18, after 47.Ke2. With singular extension
-    /// off (forced below), 10M nodes still returns 47...Rh1; 15M finds Rd8 (10M did before
-    /// the null-move en-passant accumulator fix).
+    /// off (forced below), 25M nodes still returns 47...Rh1; Rd8 comes at ~30.3M (10M before
+    /// the null-move en-passant accumulator fix, 15M before the u8 L1 input).
     #[test]
     #[cfg(not(debug_assertions))]
     fn mythos_endgame_finds_rd8_with_bounded_nodes() {
@@ -3962,7 +3962,7 @@ mod tests {
                 let tt = Arc::new(SharedTT::new(64));
                 let params = SearchParams {
                     max_depth: 32,
-                    max_nodes: Some(20_000_000),
+                    max_nodes: Some(40_000_000),
                     use_nnue: true,
                     contempt: 8,
                     singular_ext_mode: 0,
@@ -3973,7 +3973,7 @@ mod tests {
                 );
                 assert_eq!(result.best_move.to_uci(), "d1d8");
                 // Stop checks are amortized in blocks of 1024 nodes.
-                assert!(result.nodes <= 20_001_024, "{} nodes", result.nodes);
+                assert!(result.nodes <= 40_001_024, "{} nodes", result.nodes);
             })
             .unwrap()
             .join()
