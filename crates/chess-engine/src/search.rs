@@ -4000,28 +4000,36 @@ mod tests {
 
     #[test]
     fn search_moves_restrict_the_root() {
-        let board = Board::starting_position();
-        let net = NnueNetwork::embedded();
-        let search = |moves: &[&str]| {
-            let params = SearchParams {
-                max_depth: 6,
-                search_moves: moves.iter().map(|m| Move::from_uci(m).unwrap()).collect(),
-                ..Default::default()
-            };
-            let stop = Arc::new(AtomicBool::new(false));
-            let tt = Arc::new(SharedTT::new(16));
-            iterative_deepening(
-                &board, &params, &stop, &tt, None, 0, &net, None, None, None, None, None,
-            )
-        };
-        // one move is searched fully, not through the single-legal-move shortcut
-        let only = search(&["a2a3"]);
-        assert_eq!(only.best_move.to_uci(), "a2a3");
-        assert_eq!(only.depth, 6);
-        let pair = search(&["a2a3", "h2h3"]);
-        assert!(["a2a3", "h2h3"].contains(&pair.best_move.to_uci().as_str()));
-        // no legal move listed: search everything instead of returning none
-        assert!(!search(&["e2e5"]).best_move.is_null());
+        // A full search needs more than Windows' 1 MB default test stack.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let board = Board::starting_position();
+                let net = NnueNetwork::embedded();
+                let search = |moves: &[&str]| {
+                    let params = SearchParams {
+                        max_depth: 6,
+                        search_moves: moves.iter().map(|m| Move::from_uci(m).unwrap()).collect(),
+                        ..Default::default()
+                    };
+                    let stop = Arc::new(AtomicBool::new(false));
+                    let tt = Arc::new(SharedTT::new(16));
+                    iterative_deepening(
+                        &board, &params, &stop, &tt, None, 0, &net, None, None, None, None, None,
+                    )
+                };
+                // one move is searched fully, not through the single-legal-move shortcut
+                let only = search(&["a2a3"]);
+                assert_eq!(only.best_move.to_uci(), "a2a3");
+                assert_eq!(only.depth, 6);
+                let pair = search(&["a2a3", "h2h3"]);
+                assert!(["a2a3", "h2h3"].contains(&pair.best_move.to_uci().as_str()));
+                // no legal move listed: search everything instead of returning none
+                assert!(!search(&["e2e5"]).best_move.is_null());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     fn nnue_test_state<'a>(
