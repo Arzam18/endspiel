@@ -1,3 +1,6 @@
+use std::alloc::{Layout, alloc, dealloc, handle_alloc_error};
+use std::ops::{Deref, DerefMut};
+use std::ptr::NonNull;
 use std::sync::{Arc, LazyLock};
 
 use crate::{
@@ -28,7 +31,7 @@ pub const HEADER_SIZE: usize = 32;
 pub struct NnueNetwork {
     pub l1_size: usize,
     pub l2_size: usize,
-    pub ft_weights: Box<[[i16; HIDDEN_SIZE]; INPUT_SIZE]>,
+    pub ft_weights: FtWeights,
     pub ft_biases: Box<[i16; HIDDEN_SIZE]>,
     pub l1_weights: Box<[L1Block]>,
     pub l1_biases: Box<[i32]>,
@@ -36,6 +39,94 @@ pub struct NnueNetwork {
     pub l2_biases: Box<[i32]>,
     pub l3_weights: Box<[i8]>,
     pub l3_biases: [i32; OUTPUT_BUCKETS],
+}
+
+/// Feature-transformer weights, one row per input feature (77 MB). Allocated
+/// aligned to the transparent-huge-page size and advised to use huge pages on
+/// Linux: accumulator updates read rows all over the table, and 4 KB pages
+/// turn most of those reads into TLB misses.
+pub struct FtWeights {
+    rows: NonNull<[[i16; HIDDEN_SIZE]; INPUT_SIZE]>,
+    layout: Layout,
+}
+
+// SAFETY: FtWeights owns its allocation like a Box.
+unsafe impl Send for FtWeights {}
+unsafe impl Sync for FtWeights {}
+
+impl FtWeights {
+    pub fn zeroed() -> Self {
+        let align = huge_page_size();
+        let size = size_of::<[[i16; HIDDEN_SIZE]; INPUT_SIZE]>().next_multiple_of(align);
+        let layout = Layout::from_size_align(size, align).expect("valid FT layout");
+        // SAFETY: the layout has a non-zero size.
+        let ptr = unsafe { alloc(layout) };
+        let Some(rows) = NonNull::new(ptr.cast::<[[i16; HIDDEN_SIZE]; INPUT_SIZE]>()) else {
+            handle_alloc_error(layout)
+        };
+        // Advise before the first touch, so the pages are faulted in huge.
+        advise_huge_pages(ptr, size);
+        // SAFETY: the allocation holds the array; all-zero bytes are valid i16s.
+        unsafe { rows.as_ptr().write_bytes(0, 1) };
+        Self { rows, layout }
+    }
+}
+
+impl Deref for FtWeights {
+    type Target = [[i16; HIDDEN_SIZE]; INPUT_SIZE];
+
+    #[inline(always)]
+    fn deref(&self) -> &Self::Target {
+        // SAFETY: initialised in `zeroed`, owned by self.
+        unsafe { self.rows.as_ref() }
+    }
+}
+
+impl DerefMut for FtWeights {
+    #[inline(always)]
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: initialised in `zeroed`, owned by self.
+        unsafe { self.rows.as_mut() }
+    }
+}
+
+impl Drop for FtWeights {
+    fn drop(&mut self) {
+        // SAFETY: allocated in `zeroed` with this layout.
+        unsafe { dealloc(self.rows.as_ptr().cast(), self.layout) };
+    }
+}
+
+/// The transparent-huge-page size (2 MB on x86-64; 32 MB with 16 KB base
+/// pages, as on the Raspberry Pi 5 kernel), or 2 MB where it is unknown.
+fn huge_page_size() -> usize {
+    const DEFAULT: usize = 2 << 20;
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        std::fs::read_to_string("/sys/kernel/mm/transparent_hugepage/hpage_pmd_size")
+            .ok()
+            .and_then(|size| size.trim().parse::<usize>().ok())
+            .filter(|size| size.is_power_of_two() && (4096..=(64 << 20)).contains(size))
+            .unwrap_or(DEFAULT)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    DEFAULT
+}
+
+/// Best effort: kernels without transparent huge pages ignore the advice.
+fn advise_huge_pages(ptr: *mut u8, len: usize) {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        use std::ffi::{c_int, c_void};
+        unsafe extern "C" {
+            fn madvise(addr: *mut c_void, len: usize, advice: c_int) -> c_int;
+        }
+        const MADV_HUGEPAGE: c_int = 14;
+        // SAFETY: [ptr, ptr + len) is one live allocation.
+        unsafe { madvise(ptr.cast(), len, MADV_HUGEPAGE) };
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _ = (ptr, len);
 }
 
 /// L1 inputs per chunk: the sparse L1 skips the input in 4-byte chunks.
@@ -144,11 +235,7 @@ impl NnueNetwork {
             value
         };
 
-        let mut ft_weights: Box<[[i16; HIDDEN_SIZE]; INPUT_SIZE]> =
-            vec![[0i16; HIDDEN_SIZE]; INPUT_SIZE]
-                .into_boxed_slice()
-                .try_into()
-                .unwrap();
+        let mut ft_weights = FtWeights::zeroed();
         if legacy {
             // Old nets used 768 rows per king bucket. Scatter those rows into
             // the expanded state-aware layout; new state rows remain zero, so
