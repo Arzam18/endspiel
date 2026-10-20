@@ -5,7 +5,9 @@ use std::time::Instant;
 use chess_common::moves::MoveFlag;
 use chess_common::{Board, Color, Move, PieceKind, Score, Square};
 
-use chess_nnue::{Accumulator, NnueNetwork, PieceDelta, RefreshCache, nnue_evaluate};
+use chess_nnue::{
+    AccumulatorStack, MoveUpdate, NnueNetwork, PieceDelta, RefreshCache, nnue_evaluate,
+};
 
 use crate::eval::evaluate;
 use crate::polyglot::OpeningBook;
@@ -222,7 +224,7 @@ struct SearchState<'a> {
     static_evals: [i32; MAX_PLY],
     /// Double singular extensions taken on the path from the root to each ply.
     double_exts: [u8; MAX_PLY + 1],
-    accumulators: Box<[Accumulator; MAX_PLY]>,
+    accumulators: AccumulatorStack,
     /// Refresh cache for king moves; built for `net`.
     refresh_cache: RefreshCache,
     use_nnue: bool,
@@ -276,14 +278,6 @@ impl<'a> SearchState<'a> {
         tune: TuneParams,
         learning: &'a mut PersistentHistory,
     ) -> Self {
-        // Use a Vec to avoid stack allocation of the large accumulator array
-        let mut acc_vec: Vec<Accumulator> = Vec::with_capacity(MAX_PLY);
-        for _ in 0..MAX_PLY {
-            acc_vec.push(Accumulator::new());
-        }
-        let accumulators: Box<[Accumulator; MAX_PLY]> =
-            acc_vec.into_boxed_slice().try_into().ok().unwrap();
-
         let lmr_table = build_lmr_table(tune.lmr_base, tune.lmr_div);
 
         Self {
@@ -293,7 +287,7 @@ impl<'a> SearchState<'a> {
             ply_context: [NULL_PLY_CONTEXT; MAX_PLY],
             static_evals: [0; MAX_PLY],
             double_exts: [0; MAX_PLY + 1],
-            accumulators,
+            accumulators: AccumulatorStack::new(MAX_PLY),
             refresh_cache: RefreshCache::new(&net),
             use_nnue,
             net,
@@ -1410,7 +1404,7 @@ pub fn iterative_deepening(
 
     // Initialize root accumulator for NNUE
     if state.use_nnue {
-        state.accumulators[0].refresh(board, &state.net);
+        state.accumulators.refresh(0, board, &state.net);
     }
     let offset = depth_offset(thread_id);
 
@@ -1477,7 +1471,7 @@ pub fn iterative_deepening(
             &mut quick_history,
         );
         if quick_state.use_nnue {
-            quick_state.accumulators[0].refresh(board, &quick_state.net);
+            quick_state.accumulators.refresh(0, board, &quick_state.net);
             update_accumulator_for_move(
                 &mut quick_state,
                 &board_copy,
@@ -3653,32 +3647,16 @@ fn evaluate_for_side(board: &Board, state: &mut SearchState, ply: u8) -> i32 {
         return eval;
     }
     let eval = if state.use_nnue && (ply as usize) < MAX_PLY {
-        // Lazy per-perspective refresh: a king move changes only its own HalfKA
-        // bucket. The other perspective remains incrementally updated.
-        // The board is at position P_ply so refresh is valid at this call site.
-        let refresh_white = state.accumulators[ply as usize].needs_refresh(Color::White);
-        let refresh_black = state.accumulators[ply as usize].needs_refresh(Color::Black);
-        let acc = &mut state.accumulators[ply as usize];
-        if refresh_white {
-            state
-                .refresh_cache
-                .refresh(acc, board, &state.net, Color::White);
-        }
-        if refresh_black {
-            state
-                .refresh_cache
-                .refresh(acc, board, &state.net, Color::Black);
-        }
+        // The moves since the last evaluated ancestor are applied only now; the
+        // board is at position P_ply, so a king-move refresh is valid here.
+        let acc = state
+            .accumulators
+            .get(ply as usize, board, &state.net, &mut state.refresh_cache);
         // nnue_evaluate returns score from side-to-move perspective. No HCE
         // endgame scaling on top: trained on WDL-blended targets, the net already
         // prices drawish endings, and a second hand-tuned discount double-counts.
         let piece_count = (board.occupancy[0].0 | board.occupancy[1].0).count_ones();
-        nnue_evaluate(
-            &state.accumulators[ply as usize],
-            board.side_to_move,
-            &state.net,
-            piece_count,
-        )
+        nnue_evaluate(acc, board.side_to_move, &state.net, piece_count)
     } else {
         let e = evaluate(board).0;
         match board.side_to_move {
@@ -3690,11 +3668,10 @@ fn evaluate_for_side(board: &Board, state: &mut SearchState, ply: u8) -> i32 {
     eval + state.correction(board, ply)
 }
 
-/// Incrementally update the accumulator from `src_ply` to `dst_ply` for a move.
+/// Record a move from `src_ply` to `dst_ply` on the accumulator stack; the
+/// accumulator itself is updated when `dst_ply` (or a descendant) is evaluated.
 /// Must be called AFTER `make_move` (board reflects the new position).
 /// The `captured` result from `make_move` is used to detect captures.
-///
-/// After calling this, `state.accumulators[dst_ply]` is correctly updated.
 #[allow(clippy::too_many_arguments)]
 fn update_accumulator_for_move(
     state: &mut SearchState,
@@ -3750,47 +3727,43 @@ fn update_accumulator_for_move(
         pieces.add(us, PieceKind::Rook, rook_to);
     }
 
-    // Parent and child occupy distinct slots. Only perspectives that remain
-    // valid after this move are written; dirty ones wait for lazy refresh.
-    debug_assert!(src_ply < dst_ply);
-    let (parents, children) = state.accumulators.split_at_mut(dst_ply);
-    children[0].update_from(
-        &parents[src_ply],
-        &state.net,
+    debug_assert_eq!(src_ply + 1, dst_ply);
+    state.accumulators.push(
+        dst_ply,
         (moving_kind == PieceKind::King).then_some(us),
-        board.king_square(Color::White),
-        board.king_square(Color::Black),
-        &pieces,
-        previous_castling,
-        previous_en_passant,
-        board.castling,
-        board.en_passant,
+        MoveUpdate {
+            pieces,
+            white_king: board.king_square(Color::White),
+            black_king: board.king_square(Color::Black),
+            old_castling: previous_castling,
+            old_en_passant: previous_en_passant,
+            new_castling: board.castling,
+            new_en_passant: board.en_passant,
+        },
     );
 }
 
-/// A null move changes no pieces, but it clears the en-passant square: copy the
-/// accumulator and drop that state feature. Must be called AFTER the null move
-/// is made (`board.en_passant` already cleared).
+/// A null move changes no pieces, but it clears the en-passant square. Must be
+/// called AFTER the null move is made (`board.en_passant` already cleared).
 fn update_accumulator_for_null_move(
     state: &mut SearchState,
     board: &Board,
     previous_en_passant: Option<Square>,
     ply: usize,
 ) {
-    let (parents, children) = state.accumulators.split_at_mut(ply + 1);
-    let child = &mut children[0];
-    child.clone_from(&parents[ply]);
-    if previous_en_passant.is_some() {
-        child.update_state(
-            &state.net,
-            board.king_square(Color::White),
-            board.king_square(Color::Black),
-            board.castling,
-            previous_en_passant,
-            board.castling,
-            board.en_passant,
-        );
-    }
+    state.accumulators.push(
+        ply + 1,
+        None,
+        MoveUpdate {
+            pieces: PieceDelta::new(),
+            white_king: board.king_square(Color::White),
+            black_king: board.king_square(Color::Black),
+            old_castling: board.castling,
+            old_en_passant: previous_en_passant,
+            new_castling: board.castling,
+            new_en_passant: board.en_passant,
+        },
+    );
 }
 
 /// Truncate a PV at the first move that is not legal in the given position.
@@ -3980,6 +3953,65 @@ mod tests {
             .unwrap();
     }
 
+    fn nnue_test_state<'a>(
+        net: &Arc<NnueNetwork>,
+        tt: &Arc<SharedTT>,
+        history: &'a mut PersistentHistory,
+    ) -> SearchState<'a> {
+        SearchState::new(
+            None,
+            None,
+            false,
+            0,
+            0,
+            None,
+            0,
+            0,
+            0,
+            tt,
+            true,
+            Arc::clone(net),
+            None,
+            TuneParams::default(),
+            history,
+        )
+    }
+
+    /// The stack's accumulator at `ply` equals a full refresh of `board`.
+    fn assert_stack_matches_refresh(state: &mut SearchState, board: &Board, ply: usize) {
+        let net = Arc::clone(&state.net);
+        let acc = state
+            .accumulators
+            .get(ply, board, &net, &mut state.refresh_cache);
+        let mut expected = chess_nnue::Accumulator::new();
+        expected.refresh(board, &net);
+        assert_eq!(acc.white, expected.white, "{}", board.to_fen());
+        assert_eq!(acc.black, expected.black, "{}", board.to_fen());
+    }
+
+    fn make_uci_move(state: &mut SearchState, board: &mut Board, uci: &str, ply: usize) {
+        let legal = chess_core::generate_legal_moves(board);
+        let m = legal
+            .as_slice()
+            .iter()
+            .copied()
+            .find(|m| m.to_uci() == uci)
+            .unwrap_or_else(|| panic!("move {uci} is not legal in {}", board.to_fen()));
+        let prev_castling = board.castling;
+        let prev_ep = board.en_passant;
+        let captured = board.make_move(m);
+        update_accumulator_for_move(
+            state,
+            board,
+            m,
+            captured,
+            prev_castling,
+            prev_ep,
+            ply,
+            ply + 1,
+        );
+    }
+
     #[test]
     fn null_move_drops_the_en_passant_state_feature() {
         // After 1. e4 the en-passant square is e3; the null move clears it.
@@ -3989,108 +4021,70 @@ mod tests {
         let net = NnueNetwork::embedded();
         let tt = Arc::new(SharedTT::new(1));
         let mut history = PersistentHistory::new();
-        let mut state = SearchState::new(
-            None,
-            None,
-            false,
-            0,
-            0,
-            None,
-            0,
-            0,
-            0,
-            &tt,
-            true,
-            Arc::clone(&net),
-            None,
-            TuneParams::default(),
-            &mut history,
-        );
-        state.accumulators[0].refresh(&board, &net);
+        let mut state = nnue_test_state(&net, &tt, &mut history);
+        state.accumulators.refresh(0, &board, &net);
 
         let prev_ep = board.en_passant;
         board.side_to_move = board.side_to_move.opposite();
         board.en_passant = None;
         update_accumulator_for_null_move(&mut state, &board, prev_ep, 0);
-
-        let mut expected = Accumulator::new();
-        expected.refresh(&board, &net);
-        assert_eq!(state.accumulators[1].white, expected.white);
-        assert_eq!(state.accumulators[1].black, expected.black);
+        assert_stack_matches_refresh(&mut state, &board, 1);
     }
 
-    fn assert_partial_king_refresh_matches_full(fen: &str, uci: &str) {
-        let mut board = Board::from_fen(fen).expect("valid test FEN");
-        let moving_side = board.side_to_move;
-        let net = NnueNetwork::embedded();
-        let tt = Arc::new(SharedTT::new(1));
-        let mut history = PersistentHistory::new();
-        let mut state = SearchState::new(
-            None,
-            None,
-            false,
-            0,
-            0,
-            None,
-            0,
-            0,
-            0,
-            &tt,
-            true,
-            Arc::clone(&net),
-            None,
-            TuneParams::default(),
-            &mut history,
-        );
-        state.accumulators[0].refresh(&board, &net);
-
-        let legal = chess_core::generate_legal_moves(&board);
-        let m = legal
-            .as_slice()
-            .iter()
-            .copied()
-            .find(|m| m.to_uci() == uci)
-            .unwrap_or_else(|| panic!("move {uci} is not legal in {fen}"));
-        let prev_castling = board.castling;
-        let prev_ep = board.en_passant;
-        let captured = board.make_move(m);
-        update_accumulator_for_move(
-            &mut state,
-            &board,
-            m,
-            captured,
-            prev_castling,
-            prev_ep,
-            0,
-            1,
-        );
-
-        let mut expected = Accumulator::new();
-        expected.refresh(&board, &net);
-        let incremental = &state.accumulators[1];
-        assert!(incremental.needs_refresh(moving_side));
-        assert!(!incremental.needs_refresh(moving_side.opposite()));
-        match moving_side {
-            Color::White => assert_eq!(incremental.black, expected.black),
-            Color::Black => assert_eq!(incremental.white, expected.white),
+    #[test]
+    fn king_moves_and_castling_match_refresh() {
+        for (fen, uci) in [
+            ("4k3/8/8/8/8/8/3R4/4K3 w - - 0 1", "e1f1"),
+            ("4k3/3r4/8/8/8/8/8/4K3 b - - 0 1", "e8f8"),
+            ("4k3/8/8/8/8/8/5p2/4K3 w - - 0 1", "e1f2"),
+            ("4k3/8/8/8/8/8/8/4K2R w K - 0 1", "e1g1"),
+            ("r3k3/8/8/8/8/8/8/4K3 b q - 0 1", "e8c8"),
+        ] {
+            let mut board = Board::from_fen(fen).expect("valid test FEN");
+            let net = NnueNetwork::embedded();
+            let tt = Arc::new(SharedTT::new(1));
+            let mut history = PersistentHistory::new();
+            let mut state = nnue_test_state(&net, &tt, &mut history);
+            state.accumulators.refresh(0, &board, &net);
+            make_uci_move(&mut state, &mut board, uci, 0);
+            assert_stack_matches_refresh(&mut state, &board, 1);
         }
-
-        state.accumulators[1].refresh_perspective(&board, &net, moving_side);
-        assert_eq!(state.accumulators[1].white, expected.white);
-        assert_eq!(state.accumulators[1].black, expected.black);
     }
 
     #[test]
-    fn king_moves_refresh_only_their_own_perspective() {
-        assert_partial_king_refresh_matches_full("4k3/8/8/8/8/8/3R4/4K3 w - - 0 1", "e1f1");
-        assert_partial_king_refresh_matches_full("4k3/3r4/8/8/8/8/8/4K3 b - - 0 1", "e8f8");
-        assert_partial_king_refresh_matches_full("4k3/8/8/8/8/8/5p2/4K3 w - - 0 1", "e1f2");
-    }
-
-    #[test]
-    fn castling_keeps_the_opponent_perspective_incremental() {
-        assert_partial_king_refresh_matches_full("4k3/8/8/8/8/8/8/4K2R w K - 0 1", "e1g1");
-        assert_partial_king_refresh_matches_full("r3k3/8/8/8/8/8/8/4K3 b q - 0 1", "e8c8");
+    fn lazy_accumulators_match_refresh_across_unevaluated_plies() {
+        // Castling, a capture, en passant, promotion, king moves and a null
+        // move, with plies evaluated only now and then.
+        let line = [
+            "e2e4", "d7d5", "e4d5", "e7e5", "d5e6", "f8c5", "g1f3", "g8f6", "f1c4", "e8g8", "e1g1",
+            "b8c6", "e6f7", "g8h8", "d2d3", "f8e8", "f7e8q",
+        ];
+        for evaluate_every in [1, 2, 3, 5, 100] {
+            let mut board = Board::starting_position();
+            let net = NnueNetwork::embedded();
+            let tt = Arc::new(SharedTT::new(1));
+            let mut history = PersistentHistory::new();
+            let mut state = nnue_test_state(&net, &tt, &mut history);
+            state.accumulators.refresh(0, &board, &net);
+            let mut ply = 0;
+            for (index, uci) in line.iter().enumerate() {
+                make_uci_move(&mut state, &mut board, uci, ply);
+                ply += 1;
+                if index == 2 || index == 9 {
+                    // a null-move branch; the line then continues from `ply`
+                    let mut null = board.clone();
+                    let prev_ep = null.en_passant;
+                    null.side_to_move = null.side_to_move.opposite();
+                    null.en_passant = None;
+                    update_accumulator_for_null_move(&mut state, &null, prev_ep, ply);
+                    assert_stack_matches_refresh(&mut state, &null, ply + 1);
+                }
+                if (index + 1) % evaluate_every == 0 {
+                    assert_stack_matches_refresh(&mut state, &board, ply);
+                }
+            }
+            assert_stack_matches_refresh(&mut state, &board, ply);
+        }
     }
 
     #[test]

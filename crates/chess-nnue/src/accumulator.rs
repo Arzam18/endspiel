@@ -354,6 +354,7 @@ simd_apply_rows!(
 
 /// Pieces a move removes and adds, in board terms; [`Accumulator::update_from`]
 /// turns them into feature rows per perspective.
+#[derive(Clone, Copy)]
 pub struct PieceDelta {
     removed: [(Color, PieceKind, Square); 3],
     added: [(Color, PieceKind, Square); 2],
@@ -388,6 +389,71 @@ impl PieceDelta {
     pub fn add(&mut self, color: Color, kind: PieceKind, sq: Square) {
         self.added[self.n_added] = (color, kind, sq);
         self.n_added += 1;
+    }
+}
+
+/// One move as the accumulator sees it: the pieces it changes, the king squares
+/// after it, and the castling / en-passant state before and after. A null move
+/// is an empty [`PieceDelta`] that clears the en-passant square.
+#[derive(Clone, Copy)]
+pub struct MoveUpdate {
+    pub pieces: PieceDelta,
+    pub white_king: Square,
+    pub black_king: Square,
+    pub old_castling: CastlingRights,
+    pub old_en_passant: Option<Square>,
+    pub new_castling: CastlingRights,
+    pub new_en_passant: Option<Square>,
+}
+
+impl MoveUpdate {
+    /// Feature rows this move removes from and adds to `perspective`, whose
+    /// king bucket must be the same before and after the move.
+    fn rows(&self, perspective: Color) -> RowDelta {
+        let (white_king, black_king) = (self.white_king, self.black_king);
+        let mut delta = RowDelta::default();
+        let old = state_feature_indices(
+            perspective,
+            white_king,
+            black_king,
+            self.old_castling,
+            self.old_en_passant,
+        );
+        let new = state_feature_indices(
+            perspective,
+            white_king,
+            black_king,
+            self.new_castling,
+            self.new_en_passant,
+        );
+        for (old_index, new_index) in old.into_iter().zip(new) {
+            if old_index != new_index {
+                delta.sub(old_index);
+                delta.add(new_index);
+            }
+        }
+        let pieces = &self.pieces;
+        for &(color, kind, sq) in &pieces.removed[..pieces.n_removed] {
+            delta.sub(feature_index(
+                perspective,
+                white_king,
+                black_king,
+                color,
+                kind,
+                sq,
+            ));
+        }
+        for &(color, kind, sq) in &pieces.added[..pieces.n_added] {
+            delta.add(feature_index(
+                perspective,
+                white_king,
+                black_king,
+                color,
+                kind,
+                sq,
+            ));
+        }
+        delta
     }
 }
 
@@ -527,84 +593,47 @@ impl Accumulator {
         }
     }
 
-    /// Full recompute from scratch using the board state.
     /// Child accumulator for a move: copies the parent's refresh flags, marks
     /// `invalidate` dirty (the mover's perspective after a king move), and
     /// writes `parent − removed + added` (pieces and changed state features)
     /// for every clean perspective in one pass. Same result as
     /// [`copy_clean_from`](Self::copy_clean_from) + [`update_state`](Self::update_state)
     /// + [`sub_piece`](Self::sub_piece) / [`add_piece`](Self::add_piece).
-    #[allow(clippy::too_many_arguments)]
     pub fn update_from(
         &mut self,
         parent: &Self,
         net: &NnueNetwork,
         invalidate: Option<Color>,
-        white_king: Square,
-        black_king: Square,
-        pieces: &PieceDelta,
-        old_castling: CastlingRights,
-        old_en_passant: Option<Square>,
-        new_castling: CastlingRights,
-        new_en_passant: Option<Square>,
+        update: &MoveUpdate,
     ) {
         self.needs_refresh = parent.needs_refresh;
         if let Some(color) = invalidate {
             self.mark_refresh(color);
         }
         for perspective in [Color::White, Color::Black] {
-            if self.needs_refresh(perspective) {
-                continue;
+            if !self.needs_refresh(perspective) {
+                self.apply_move(parent, net, perspective, update);
             }
-            let mut delta = RowDelta::default();
-            let old = state_feature_indices(
-                perspective,
-                white_king,
-                black_king,
-                old_castling,
-                old_en_passant,
-            );
-            let new = state_feature_indices(
-                perspective,
-                white_king,
-                black_king,
-                new_castling,
-                new_en_passant,
-            );
-            for (old_index, new_index) in old.into_iter().zip(new) {
-                if old_index != new_index {
-                    delta.sub(old_index);
-                    delta.add(new_index);
-                }
-            }
-            for &(color, kind, sq) in &pieces.removed[..pieces.n_removed] {
-                delta.sub(feature_index(
-                    perspective,
-                    white_king,
-                    black_king,
-                    color,
-                    kind,
-                    sq,
-                ));
-            }
-            for &(color, kind, sq) in &pieces.added[..pieces.n_added] {
-                delta.add(feature_index(
-                    perspective,
-                    white_king,
-                    black_king,
-                    color,
-                    kind,
-                    sq,
-                ));
-            }
-            let (dst, src) = match perspective {
-                Color::White => (&mut self.white, &parent.white),
-                Color::Black => (&mut self.black, &parent.black),
-            };
-            apply_rows(dst, src, net, &delta);
         }
     }
 
+    /// `self[perspective] = parent[perspective]` with `update` applied.
+    #[inline]
+    fn apply_move(
+        &mut self,
+        parent: &Self,
+        net: &NnueNetwork,
+        perspective: Color,
+        update: &MoveUpdate,
+    ) {
+        let (dst, src) = match perspective {
+            Color::White => (&mut self.white, &parent.white),
+            Color::Black => (&mut self.black, &parent.black),
+        };
+        apply_rows(dst, src, net, &update.rows(perspective));
+    }
+
+    /// Full recompute from scratch using the board state.
     pub fn refresh(&mut self, board: &Board, net: &NnueNetwork) {
         self.refresh_perspective(board, net, Color::White);
         self.refresh_perspective(board, net, Color::Black);
@@ -757,6 +786,108 @@ impl Accumulator {
     }
 }
 
+/// One ply of an [`AccumulatorStack`].
+#[derive(Clone)]
+struct StackEntry {
+    acc: Accumulator,
+    /// The move from the previous ply into this one.
+    update: MoveUpdate,
+    /// Perspectives whose values in `acc` belong to this ply's position.
+    computed: [bool; 2],
+    /// Perspectives whose king moved into this ply: their king bucket changed,
+    /// so they cannot be derived from the previous ply.
+    king_moved: [bool; 2],
+}
+
+/// Accumulators along the search path, updated lazily. A move only records its
+/// [`MoveUpdate`]; [`AccumulatorStack::get`] replays a perspective's pending
+/// moves from its nearest computed ancestor when a position is evaluated, so
+/// nodes that are never evaluated (TT cutoffs, in-check nodes, draws) cost no
+/// accumulator work. A perspective whose king moved on the way is rebuilt from
+/// the board through the [`RefreshCache`]. The values are bit-identical to
+/// updating every ply eagerly: i16 lanes wrap, so the order of sums is free.
+pub struct AccumulatorStack {
+    entries: Box<[StackEntry]>,
+}
+
+impl AccumulatorStack {
+    pub fn new(plies: usize) -> Self {
+        let entry = StackEntry {
+            acc: Accumulator::new(),
+            update: MoveUpdate {
+                pieces: PieceDelta::new(),
+                white_king: Square::E1,
+                black_king: Square::E8,
+                old_castling: CastlingRights::NONE,
+                old_en_passant: None,
+                new_castling: CastlingRights::NONE,
+                new_en_passant: None,
+            },
+            computed: [false; 2],
+            king_moved: [false; 2],
+        };
+        Self {
+            entries: vec![entry; plies].into_boxed_slice(),
+        }
+    }
+
+    /// Build `ply` for `board` from scratch (the search root).
+    pub fn refresh(&mut self, ply: usize, board: &Board, net: &NnueNetwork) {
+        let entry = &mut self.entries[ply];
+        entry.acc.refresh(board, net);
+        entry.computed = [true; 2];
+    }
+
+    /// Record the move from `ply - 1` into `ply`. `king_moved` is the side
+    /// that moved its king, if any.
+    #[inline]
+    pub fn push(&mut self, ply: usize, king_moved: Option<Color>, update: MoveUpdate) {
+        let entry = &mut self.entries[ply];
+        entry.update = update;
+        entry.computed = [false; 2];
+        entry.king_moved = [false; 2];
+        if let Some(color) = king_moved {
+            entry.king_moved[color.index()] = true;
+        }
+    }
+
+    /// The accumulator of `ply`, brought up to date; `board` is the position
+    /// at that ply.
+    pub fn get(
+        &mut self,
+        ply: usize,
+        board: &Board,
+        net: &NnueNetwork,
+        cache: &mut RefreshCache,
+    ) -> &Accumulator {
+        for perspective in [Color::White, Color::Black] {
+            let side = perspective.index();
+            let mut base = ply;
+            while !self.entries[base].computed[side] && !self.entries[base].king_moved[side] {
+                if base == 0 {
+                    break;
+                }
+                base -= 1;
+            }
+            if self.entries[base].computed[side] {
+                for child in base + 1..=ply {
+                    let (parents, children) = self.entries.split_at_mut(child);
+                    let entry = &mut children[0];
+                    entry
+                        .acc
+                        .apply_move(&parents[child - 1].acc, net, perspective, &entry.update);
+                    entry.computed[side] = true;
+                }
+            } else {
+                let entry = &mut self.entries[ply];
+                cache.refresh(&mut entry.acc, board, net, perspective);
+                entry.computed[side] = true;
+            }
+        }
+        &self.entries[ply].acc
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -871,18 +1002,16 @@ mod tests {
                 expected.add_piece(&net, white_king, black_king, c, k, sq);
             }
             let mut actual = Accumulator::new();
-            actual.update_from(
-                &parent,
-                &net,
-                invalidate,
+            let update = MoveUpdate {
+                pieces,
                 white_king,
                 black_king,
-                &pieces,
                 old_castling,
-                old_ep,
+                old_en_passant: old_ep,
                 new_castling,
-                new_ep,
-            );
+                new_en_passant: new_ep,
+            };
+            actual.update_from(&parent, &net, invalidate, &update);
             assert_eq!(actual.needs_refresh, expected.needs_refresh);
             for perspective in [Color::White, Color::Black] {
                 if !expected.needs_refresh(perspective) {
