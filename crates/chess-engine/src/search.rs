@@ -1330,6 +1330,7 @@ pub fn iterative_deepening(
     // to avoid polyglot hash collisions returning garbage moves in endgames)
     let game_ply = board.position_history.len();
     if let Some(book) = external_book.as_deref()
+        && params.search_moves.is_empty()
         && game_ply <= 30
         && let Some(book_move) = probe_opening_book(board, book)
     {
@@ -1425,7 +1426,15 @@ pub fn iterative_deepening(
     let mut best_pv = Vec::new();
     let mut best_depth = 0u8;
 
-    let root_moves = chess_core::generate_legal_moves(board);
+    let mut root_moves: Vec<Move> = chess_core::generate_legal_moves(board)
+        .iter()
+        .copied()
+        .collect();
+    // `go searchmoves`: keep only the listed moves; if none of them is legal,
+    // search everything rather than return no move.
+    if root_moves.iter().any(|m| params.search_moves.contains(m)) {
+        root_moves.retain(|m| params.search_moves.contains(m));
+    }
     if root_moves.is_empty() {
         let score = if chess_core::is_in_check(board) {
             Score::NEG_MATE
@@ -1441,10 +1450,11 @@ pub fn iterative_deepening(
         };
     }
 
-    if root_moves.len() == 1 && !params.infinite {
+    if root_moves.len() == 1 && params.search_moves.is_empty() && !params.infinite {
         // Only one legal move — do a quick search after making it to get
         // an accurate score (important for mate detection and analysis).
-        let only_move = *root_moves.iter().next().unwrap();
+        // Not for `searchmoves` of one move: that asks for a full analysis.
+        let only_move = root_moves[0];
         let mut board_copy = board.clone();
         let prev_castling = board_copy.castling;
         let prev_ep = board_copy.en_passant;
@@ -3986,6 +3996,32 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn search_moves_restrict_the_root() {
+        let board = Board::starting_position();
+        let net = NnueNetwork::embedded();
+        let search = |moves: &[&str]| {
+            let params = SearchParams {
+                max_depth: 6,
+                search_moves: moves.iter().map(|m| Move::from_uci(m).unwrap()).collect(),
+                ..Default::default()
+            };
+            let stop = Arc::new(AtomicBool::new(false));
+            let tt = Arc::new(SharedTT::new(16));
+            iterative_deepening(
+                &board, &params, &stop, &tt, None, 0, &net, None, None, None, None, None,
+            )
+        };
+        // one move is searched fully, not through the single-legal-move shortcut
+        let only = search(&["a2a3"]);
+        assert_eq!(only.best_move.to_uci(), "a2a3");
+        assert_eq!(only.depth, 6);
+        let pair = search(&["a2a3", "h2h3"]);
+        assert!(["a2a3", "h2h3"].contains(&pair.best_move.to_uci().as_str()));
+        // no legal move listed: search everything instead of returning none
+        assert!(!search(&["e2e5"]).best_move.is_null());
     }
 
     fn nnue_test_state<'a>(

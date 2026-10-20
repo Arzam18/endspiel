@@ -459,6 +459,17 @@ impl UciHandler {
             (n, None) => n,
         };
 
+        let search_moves: Vec<Move> = params
+            .searchmoves
+            .iter()
+            .filter_map(|uci| {
+                let m = find_legal_move(&self.board, uci, self.chess960);
+                if m.is_none() {
+                    log::warn!("go searchmoves: ignoring illegal move {uci}");
+                }
+                m
+            })
+            .collect();
         let mut search_params = SearchParams {
             max_depth: params.depth.unwrap_or(64),
             max_nodes,
@@ -478,6 +489,7 @@ impl UciHandler {
             tune: self.engine.tune().clone(),
             ponder: None,
             chess960: self.chess960,
+            search_moves,
         };
 
         // Pondering: the board is the predicted position (opponent's expected

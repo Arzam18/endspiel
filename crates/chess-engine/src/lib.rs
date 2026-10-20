@@ -69,6 +69,8 @@ pub struct SearchParams {
     /// UCI_Chess960. Opening time throttle is skipped: there is no book, and
     /// the first moves are the ones that need the long think.
     pub chess960: bool,
+    /// UCI `go searchmoves`: search only these root moves (empty = all).
+    pub search_moves: Vec<Move>,
 }
 
 /// Internal search constants (LMR, RFP, futility, SEE quiet, corrhist).
@@ -132,6 +134,7 @@ impl Default for SearchParams {
             tune: TuneParams::default(),
             ponder: None,
             chess960: false,
+            search_moves: Vec::new(),
         }
     }
 }
