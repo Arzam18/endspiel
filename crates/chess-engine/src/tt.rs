@@ -41,6 +41,8 @@ pub struct TTData {
     pub score: i32,
     pub flag: TTFlag,
     pub best_move: Move,
+    /// Static eval of the position before the learned correction, if stored.
+    pub eval: Option<i32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -49,17 +51,34 @@ pub struct TTData {
 //   bits 16..31 : score (i16, clamped)
 //   bits 32..39 : depth (u8)
 //   bits 40..41 : flag (2 bits)
-//   bits 42..49 : generation (8 bits)
-//   bits 50..63 : unused
+//   bits 42..47 : generation (6 bits)
+//   bits 48..63 : static eval (i16, `EVAL_NONE` = not stored)
 // ---------------------------------------------------------------------------
 
-fn pack_data(depth: u8, score: i32, flag: TTFlag, best_move: Move, generation: u8) -> u64 {
+/// Generations wrap at 64. Only equality is compared, so after a wrap an entry
+/// from 64 searches ago merely looks current to the replacement rule.
+const GENERATION_MASK: u8 = 0x3F;
+const EVAL_NONE: i16 = i16::MIN;
+
+fn pack_data(
+    depth: u8,
+    score: i32,
+    flag: TTFlag,
+    best_move: Move,
+    generation: u8,
+    eval: Option<i32>,
+) -> u64 {
     let m = best_move.0 as u64;
     let s = (score.clamp(-32000, 32000) as i16) as u16 as u64;
     let d = depth as u64;
     let f = flag as u64;
-    let g = generation as u64;
-    m | (s << 16) | (d << 32) | (f << 40) | (g << 42)
+    let g = (generation & GENERATION_MASK) as u64;
+    // an eval outside i16 is not cached rather than clamped
+    let e = eval
+        .and_then(|eval| i16::try_from(eval).ok())
+        .filter(|&eval| eval != EVAL_NONE)
+        .unwrap_or(EVAL_NONE) as u16 as u64;
+    m | (s << 16) | (d << 32) | (f << 40) | (g << 42) | (e << 48)
 }
 
 fn unpack_data(data: u64) -> (TTData, u8) {
@@ -67,13 +86,15 @@ fn unpack_data(data: u64) -> (TTData, u8) {
     let score = ((data >> 16) & 0xFFFF) as u16 as i16 as i32;
     let depth = ((data >> 32) & 0xFF) as u8;
     let flag = TTFlag::from_u8(((data >> 40) & 3) as u8);
-    let generation = ((data >> 42) & 0xFF) as u8;
+    let generation = ((data >> 42) as u8) & GENERATION_MASK;
+    let eval = (data >> 48) as u16 as i16;
     (
         TTData {
             depth,
             score,
             flag,
             best_move,
+            eval: (eval != EVAL_NONE).then_some(i32::from(eval)),
         },
         generation,
     )
@@ -152,12 +173,22 @@ impl SharedTT {
     /// - Always replace if same hash (refinement)
     /// - Replace if current generation is newer than stored
     /// - Replace if depth is >= stored depth within same generation
-    pub fn store(&self, hash: u64, depth: u8, score: i32, flag: TTFlag, best_move: Move) {
+    ///
+    /// `eval` is the node's static eval before the correction, if it has one.
+    pub fn store(
+        &self,
+        hash: u64,
+        depth: u8,
+        score: i32,
+        flag: TTFlag,
+        best_move: Move,
+        eval: Option<i32>,
+    ) {
         let idx = hash as usize & self.mask;
         let entry = &self.entries[idx];
-        let generation = self.generation.load(Ordering::Relaxed);
+        let generation = self.generation.load(Ordering::Relaxed) & GENERATION_MASK;
 
-        let data = pack_data(depth, score, flag, best_move, generation);
+        let data = pack_data(depth, score, flag, best_move, generation, eval);
 
         // Check if we should replace
         let old_data = entry.data.load(Ordering::Relaxed);
@@ -186,7 +217,7 @@ impl SharedTT {
     pub fn hashfull(&self) -> u16 {
         let sample = 1000.min(self.entries.len());
         let mut used = 0u32;
-        let generation = self.generation.load(Ordering::Relaxed);
+        let generation = self.generation.load(Ordering::Relaxed) & GENERATION_MASK;
 
         for i in 0..sample {
             let data = self.entries[i].data.load(Ordering::Relaxed);
@@ -228,25 +259,38 @@ mod tests {
     #[test]
     fn test_pack_unpack_roundtrip() {
         let m = Move(1234);
-        let data = pack_data(12, -500, TTFlag::LowerBound, m, 7);
+        let data = pack_data(12, -500, TTFlag::LowerBound, m, 7, Some(-321));
         let (entry, generation) = unpack_data(data);
         assert_eq!(entry.depth, 12);
         assert_eq!(entry.score, -500);
         assert_eq!(entry.flag, TTFlag::LowerBound);
         assert_eq!(entry.best_move, m);
         assert_eq!(generation, 7);
+        assert_eq!(entry.eval, Some(-321));
     }
 
     #[test]
     fn test_pack_unpack_positive_score() {
         let m = Move(4321);
-        let data = pack_data(20, 31000, TTFlag::Exact, m, 255);
+        let data = pack_data(20, 31000, TTFlag::Exact, m, 63, Some(i32::from(i16::MAX)));
         let (entry, generation) = unpack_data(data);
         assert_eq!(entry.depth, 20);
         assert_eq!(entry.score, 31000);
         assert_eq!(entry.flag, TTFlag::Exact);
         assert_eq!(entry.best_move, m);
-        assert_eq!(generation, 255);
+        assert_eq!(generation, 63);
+        assert_eq!(entry.eval, Some(i32::from(i16::MAX)));
+    }
+
+    #[test]
+    fn test_eval_outside_i16_is_not_stored() {
+        for eval in [None, Some(40_000), Some(-40_000), Some(i32::from(i16::MIN))] {
+            let data = pack_data(5, 0, TTFlag::Exact, Move(1), 64 + 3, eval);
+            let (entry, generation) = unpack_data(data);
+            assert_eq!(entry.eval, None, "{eval:?}");
+            assert_eq!(generation, 3);
+            assert_eq!(entry.depth, 5);
+        }
     }
 
     #[test]
@@ -255,7 +299,7 @@ mod tests {
         let hash = 0xDEAD_BEEF_1234_5678u64;
         let m = Move(100);
 
-        tt.store(hash, 8, 150, TTFlag::Exact, m);
+        tt.store(hash, 8, 150, TTFlag::Exact, m, Some(42));
         let result = tt.probe(hash);
         assert!(result.is_some());
         let entry = result.unwrap();
@@ -263,6 +307,7 @@ mod tests {
         assert_eq!(entry.score, 150);
         assert_eq!(entry.flag, TTFlag::Exact);
         assert_eq!(entry.best_move, m);
+        assert_eq!(entry.eval, Some(42));
     }
 
     #[test]
@@ -278,7 +323,7 @@ mod tests {
 
         // Store some entries
         for i in 0..500u64 {
-            tt.store(i * 7919, 5, 0, TTFlag::Exact, Move::NULL);
+            tt.store(i * 7919, 5, 0, TTFlag::Exact, Move::NULL, None);
         }
         let hf = tt.hashfull();
         assert!(hf > 0, "hashfull should be > 0 after storing entries");
@@ -290,13 +335,13 @@ mod tests {
         let hash = 0x1234_5678_ABCD_EF01u64;
 
         // Store at generation 0
-        tt.store(hash, 10, 100, TTFlag::Exact, Move(200));
+        tt.store(hash, 10, 100, TTFlag::Exact, Move(200), None);
 
         // New search bumps generation
         tt.new_search();
 
         // Store at generation 1 — should replace even at lower depth
-        tt.store(hash, 3, 50, TTFlag::UpperBound, Move(300));
+        tt.store(hash, 3, 50, TTFlag::UpperBound, Move(300), None);
 
         let entry = tt.probe(hash).unwrap();
         assert_eq!(entry.depth, 3);
@@ -307,7 +352,7 @@ mod tests {
     #[test]
     fn test_clear() {
         let tt = SharedTT::new(1);
-        tt.store(42, 5, 100, TTFlag::Exact, Move(10));
+        tt.store(42, 5, 100, TTFlag::Exact, Move(10), None);
         assert!(tt.probe(42).is_some());
 
         tt.clear();

@@ -2347,6 +2347,7 @@ fn alpha_beta_root(
         score_to_tt(best_score, 0),
         tt_store_flag,
         best_move,
+        None,
     );
 
     best_score
@@ -2500,6 +2501,7 @@ fn alpha_beta(
                 score_to_tt(tb_score, ply),
                 flag,
                 Move::NULL,
+                None,
             );
             match flag {
                 TTFlag::LowerBound => {
@@ -2546,13 +2548,14 @@ fn alpha_beta(
     // In check: static eval is unreliable and all eval-based pruning is
     // skipped. Use a sentinel so `improving` is true after escaping check
     // (erring on the side of searching more — the safe direction).
-    let static_eval = if in_check {
-        i32::MIN / 2
+    let (unadjusted_eval, static_eval) = if in_check {
+        (None, i32::MIN / 2)
     } else {
-        let raw = evaluate_for_side(board, state, ply);
+        let (unadjusted, raw) =
+            evaluate_for_side(board, state, ply, tt_entry.and_then(|entry| entry.eval));
         // Refine with TT bound: the search result at this position is
         // often a more accurate estimate than the static eval.
-        if tt_entry.is_some() && tt_score.abs() < MATE_THRESHOLD {
+        let refined = if tt_entry.is_some() && tt_score.abs() < MATE_THRESHOLD {
             match tt_flag {
                 TTFlag::Exact => tt_score,
                 TTFlag::LowerBound if tt_score > raw => tt_score,
@@ -2561,7 +2564,8 @@ fn alpha_beta(
             }
         } else {
             raw
-        }
+        };
+        (unadjusted, refined)
     };
 
     if (ply as usize) < MAX_PLY {
@@ -2716,6 +2720,7 @@ fn alpha_beta(
                             score_to_tt(score, ply),
                             TTFlag::LowerBound,
                             m,
+                            unadjusted_eval,
                         );
                         return score;
                     }
@@ -3211,6 +3216,7 @@ fn alpha_beta(
             score_to_tt(best_score, ply),
             tt_store_flag,
             best_move,
+            unadjusted_eval,
         );
     }
 
@@ -3372,6 +3378,7 @@ fn quiescence(
                             score_to_tt(best_score, ply),
                             TTFlag::LowerBound,
                             best_move,
+                            None,
                         );
                         return beta;
                     }
@@ -3389,14 +3396,20 @@ fn quiescence(
         } else {
             TTFlag::UpperBound
         };
-        state
-            .tt
-            .store(board.hash, 0, score_to_tt(best_score, ply), flag, best_move);
+        state.tt.store(
+            board.hash,
+            0,
+            score_to_tt(best_score, ply),
+            flag,
+            best_move,
+            None,
+        );
         return alpha;
     }
 
     // Not in check: normal qsearch with stand-pat
-    let stand_pat = evaluate_for_side(board, state, ply);
+    let (unadjusted_eval, stand_pat) =
+        evaluate_for_side(board, state, ply, tt_entry.and_then(|entry| entry.eval));
 
     if stand_pat >= beta {
         state.tt.store(
@@ -3405,6 +3418,7 @@ fn quiescence(
             score_to_tt(stand_pat, ply),
             TTFlag::LowerBound,
             Move::NULL,
+            unadjusted_eval,
         );
         return beta;
     }
@@ -3512,6 +3526,7 @@ fn quiescence(
                 score_to_tt(best_score, ply),
                 TTFlag::LowerBound,
                 best_move,
+                unadjusted_eval,
             );
             return beta;
         }
@@ -3591,6 +3606,7 @@ fn quiescence(
                     score_to_tt(best_score, ply),
                     TTFlag::LowerBound,
                     best_move,
+                    unadjusted_eval,
                 );
                 return beta;
             }
@@ -3611,9 +3627,14 @@ fn quiescence(
         } else {
             TTFlag::UpperBound
         };
-        state
-            .tt
-            .store(board.hash, 0, score_to_tt(best_score, ply), flag, best_move);
+        state.tt.store(
+            board.hash,
+            0,
+            score_to_tt(best_score, ply),
+            flag,
+            best_move,
+            unadjusted_eval,
+        );
     }
 
     alpha
@@ -3640,13 +3661,26 @@ fn capture_value(board: &Board, m: Move) -> i32 {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn evaluate_for_side(board: &Board, state: &mut SearchState, ply: u8) -> i32 {
+/// Static eval from the side to move's view, as `(unadjusted, eval)`:
+/// `unadjusted` is the net's (or HCE's) score before the learned correction,
+/// for the TT to cache, and `cached` is such a score from the TT, which saves
+/// the evaluation. `unadjusted` is `None` for the HCE fallback past `MAX_PLY`,
+/// which must not stand in for the net's score.
+fn evaluate_for_side(
+    board: &Board,
+    state: &mut SearchState,
+    ply: u8,
+    cached: Option<i32>,
+) -> (Option<i32>, i32) {
     // Hand-crafted endings (K+B+N vs K, K+Q vs K+R, dead draws) replace the net:
     // it has no gradient there without tablebases (see endgame.rs).
     if let Some(eval) = crate::endgame::evaluate(board) {
-        return eval;
+        return (Some(eval), eval);
     }
-    let eval = if state.use_nnue && (ply as usize) < MAX_PLY {
+    let use_net = state.use_nnue && (ply as usize) < MAX_PLY;
+    let eval = if let Some(eval) = cached.filter(|_| use_net || !state.use_nnue) {
+        eval
+    } else if use_net {
         // The moves since the last evaluated ancestor are applied only now; the
         // board is at position P_ply, so a king-move refresh is valid here.
         let acc = state
@@ -3664,8 +3698,9 @@ fn evaluate_for_side(board: &Board, state: &mut SearchState, ply: u8) -> i32 {
             Color::Black => -e,
         }
     };
+    let unadjusted = (use_net || !state.use_nnue).then_some(eval);
     // Nudge the static eval by the learned correction for this position.
-    eval + state.correction(board, ply)
+    (unadjusted, eval + state.correction(board, ply))
 }
 
 /// Record a move from `src_ply` to `dst_ply` on the accumulator stack; the
@@ -3848,7 +3883,7 @@ mod tests {
     fn quiescence_fail_low_capture_stores_upper_bound() {
         with_qsearch_state(|state| {
             let mut board = Board::from_fen("7k/8/8/4p3/3P4/8/8/K7 w - - 0 1").unwrap();
-            let alpha = evaluate_for_side(&board, state, 0) + 500;
+            let alpha = evaluate_for_side(&board, state, 0, None).1 + 500;
             let mut pv = PvLine::new();
             let stop = AtomicBool::new(false);
             let score = quiescence(
@@ -3888,7 +3923,7 @@ mod tests {
             let stop = AtomicBool::new(false);
             state
                 .tt
-                .store(board.hash, 10, 7777, TTFlag::Exact, Move::NULL);
+                .store(board.hash, 10, 7777, TTFlag::Exact, Move::NULL, None);
             assert_eq!(
                 quiescence(&mut board, 0, 0, 1, &mut pv, state, &stop, false),
                 7777

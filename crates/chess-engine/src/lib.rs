@@ -320,6 +320,8 @@ impl Engine {
         let net = NnueNetwork::from_path(path)?;
         self.use_nnue = net.is_trained();
         self.nnue_net = net;
+        // TT entries cache the previous net's static evals
+        self.clear_tt();
         Ok(())
     }
 
