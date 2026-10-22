@@ -11,3 +11,7 @@ chess-core.workspace = true
 chess-engine.workspace = true
 log.workspace = true
 thiserror.workspace = true
+
+[features]
+# Expose the search constants as UCI spin options for SPSA tuning.
+tune = []

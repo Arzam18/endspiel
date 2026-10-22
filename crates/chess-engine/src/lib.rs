@@ -73,44 +73,109 @@ pub struct SearchParams {
     pub search_moves: Vec<Move>,
 }
 
-/// Internal search constants (LMR, RFP, futility, SEE quiet, corrhist).
-/// Defaults are SPSA-tuned; not exposed as UCI options.
-#[derive(Clone, Debug)]
-pub struct TuneParams {
-    /// LMR base ×100 (default 50 → 0.50)
-    pub lmr_base: i32,
-    /// LMR divisor ×100 (default 200 → 2.00)
-    pub lmr_div: i32,
-    /// Divisor for history score's influence on LMR reduction (default 4000)
-    pub hist_lmr_div: i32,
-    /// Reverse futility pruning margin per depth when improving (default 65)
-    pub rfp_margin_imp: i32,
-    /// Reverse futility pruning margin per depth when not improving (default 85)
-    pub rfp_margin_noimp: i32,
-    /// Futility pruning margin per depth when improving (default 95)
-    pub fut_margin_imp: i32,
-    /// Futility pruning margin per depth when not improving (default 65)
-    pub fut_margin_noimp: i32,
-    /// SEE quiet-move pruning margin per depth (default 50)
-    pub see_quiet_margin: i32,
-    /// Pawn-corrhist correction multiplier ×100 (default 100 → 1.00; 0 disables)
-    pub corrhist_mult: i32,
+/// Declares the search constants once: field, default, and the SPSA range.
+/// Defaults are the production values; the range only matters to a `tune`
+/// build, which exposes every field as a UCI spin option.
+macro_rules! tune_params {
+    ($($(#[doc = $doc:literal])* $name:ident: $default:literal, $min:literal..=$max:literal;)*) => {
+        /// Internal search constants (LMR, pruning margins, extensions, history,
+        /// aspiration, corrhist). Not exposed as UCI options in release builds;
+        /// the `tune` feature exposes them for SPSA.
+        #[derive(Clone, Debug)]
+        pub struct TuneParams {
+            $($(#[doc = $doc])* pub $name: i32,)*
+        }
+
+        impl Default for TuneParams {
+            fn default() -> Self {
+                Self { $($name: $default,)* }
+            }
+        }
+
+        impl TuneParams {
+            /// Every parameter as `(name, value, min, max)`.
+            pub fn spec(&self) -> Vec<(&'static str, i32, i32, i32)> {
+                vec![$((stringify!($name), self.$name, $min, $max),)*]
+            }
+
+            /// Set one parameter by name, clamped to its range. Returns false
+            /// if the name is unknown.
+            pub fn set(&mut self, name: &str, value: i32) -> bool {
+                match name {
+                    $(stringify!($name) => {
+                        self.$name = value.clamp($min, $max);
+                        true
+                    })*
+                    _ => false,
+                }
+            }
+        }
+    };
 }
 
-impl Default for TuneParams {
-    fn default() -> Self {
-        Self {
-            lmr_base: 24,
-            lmr_div: 156,
-            hist_lmr_div: 1055,
-            rfp_margin_imp: 70,
-            rfp_margin_noimp: 98,
-            fut_margin_imp: 41,
-            fut_margin_noimp: 67,
-            see_quiet_margin: 13,
-            corrhist_mult: 82,
-        }
-    }
+tune_params! {
+    /// LMR base ×100
+    lmr_base: 24, 0..=150;
+    /// LMR divisor ×100
+    lmr_div: 156, 100..=400;
+    /// Divisor for history score's influence on LMR reduction
+    hist_lmr_div: 1055, 300..=8000;
+    /// LMR: eval this far below alpha at non-PV nodes reduces one more ply
+    lmr_eval_margin: 150, 30..=400;
+    /// Reverse futility pruning margin per depth when improving
+    rfp_margin_imp: 70, 20..=200;
+    /// Reverse futility pruning margin per depth when not improving
+    rfp_margin_noimp: 98, 20..=250;
+    /// Futility pruning margin per depth when improving
+    fut_margin_imp: 41, 10..=200;
+    /// Futility pruning margin per depth when not improving
+    fut_margin_noimp: 67, 10..=200;
+    /// Futility pruning base margin
+    fut_base: 50, 0..=200;
+    /// Futility: history divisor (bigger = less history influence)
+    fut_hist_div: 64, 16..=256;
+    /// SEE quiet-move pruning margin per depth
+    see_quiet_margin: 13, 0..=100;
+    /// SEE quiet-move pruning: history divisor
+    see_quiet_hist_div: 64, 16..=256;
+    /// SEE capture pruning margin per depth
+    see_capture_margin: 30, 0..=150;
+    /// History pruning threshold per depth
+    hist_prune_margin: 3000, 500..=10000;
+    /// Null move: eval-above-beta per extra ply of reduction
+    nmp_eval_div: 200, 50..=600;
+    /// Probcut margin above beta
+    probcut_margin: 200, 50..=400;
+    /// Probcut: static eval may sit this far below the probcut beta
+    probcut_eval_slack: 100, 0..=300;
+    /// Razoring base margin
+    razor_base: 300, 50..=800;
+    /// Razoring margin per depth
+    razor_depth_mult: 200, 50..=500;
+    /// Singular beta = TT score − se_beta_mult × depth / 16
+    se_beta_mult: 32, 8..=96;
+    /// Singular extension: TT score must exceed alpha by this much (non-PV)
+    se_tt_margin: 50, 0..=150;
+    /// Double extension when every alternative fails this far below singular beta
+    double_ext_margin: 25, 0..=100;
+    /// Quiet/continuation history bonus = mult × depth² / 16
+    hist_bonus_mult: 16, 4..=64;
+    /// Quiet/continuation history malus = mult × depth² / 16
+    hist_malus_mult: 16, 4..=64;
+    /// Capture history bonus/malus = mult × depth² / 16
+    cap_hist_mult: 16, 4..=64;
+    /// Aspiration window half-width at the start of an iteration
+    asp_window: 30, 8..=100;
+    /// Aspiration widening step after the first fail
+    asp_delta: 60, 10..=200;
+    /// Quiescence delta pruning margin above a queen
+    qs_delta_margin: 200, 0..=600;
+    /// Corrhist correction multiplier ×100 (0 disables)
+    corrhist_mult: 82, 0..=300;
+    /// Corrhist: cap on the summed correction (cp)
+    corr_total_cap: 64, 16..=256;
+    /// Corrhist: cap per facet (cp)
+    corr_facet_cap: 32, 8..=128;
 }
 
 impl Default for SearchParams {
@@ -403,6 +468,11 @@ impl Engine {
     /// Get the current tune params.
     pub fn tune(&self) -> &TuneParams {
         &self.tune
+    }
+
+    /// Set one search constant by name (SPSA). Returns false if the name is unknown.
+    pub fn set_tune_param(&mut self, name: &str, value: i32) -> bool {
+        self.tune.set(name, value)
     }
 
     /// Run a search on the given position.

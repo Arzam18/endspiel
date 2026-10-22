@@ -338,6 +338,18 @@ impl UciHandler {
                 max: chess_engine::strength::ELO_MAX as i64,
             },
         }));
+        // SPSA builds (`--features tune`) expose every search constant.
+        #[cfg(feature = "tune")]
+        for (name, default, min, max) in self.engine.tune().spec() {
+            send_response(&UciResponse::Option(UciOptionDef {
+                name: name.to_string(),
+                opt_type: UciOptionType::Spin {
+                    default: default as i64,
+                    min: min as i64,
+                    max: max as i64,
+                },
+            }));
+        }
         let eval_mode = if self.engine.use_nnue() {
             "NNUE (king-bucketed HalfKA + castling/en-passant state, (32\u{00d7}785\u{2192}1536 pairwise 768)\u{00d7}2\u{2192}16\u{2192}32\u{2192}1, 8 output buckets)".to_string()
         } else {
@@ -948,6 +960,11 @@ impl UciHandler {
                     log::info!("UCI_Elo set to {}", self.uci_elo);
                 }
             }
+            #[cfg(feature = "tune")]
+            tune_name
+                if value.as_deref().and_then(|v| v.trim().parse::<i32>().ok()).is_some_and(
+                    |n| self.engine.set_tune_param(tune_name, n),
+                ) => {}
             _ => {
                 log::debug!("Unknown option: {}", name);
             }

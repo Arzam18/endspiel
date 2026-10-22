@@ -38,8 +38,6 @@ fn build_lmr_table(base_x100: i32, div_x100: i32) -> [[u8; 64]; 64] {
 // ---------------------------------------------------------------------------
 
 const MAX_PLY: usize = 128;
-/// The TT move gets +2 plies when every alternative fails this far below the singular beta.
-const DOUBLE_EXT_MARGIN: i32 = 25;
 /// Cap on double extensions along one root-to-leaf path, so forcing lines cannot explode.
 const MAX_DOUBLE_EXTS: u8 = 8;
 const MAX_KILLERS: usize = 2;
@@ -154,13 +152,11 @@ fn new_capture_history() -> CaptureHistory {
 /// by various facets of the position (pawn structure, non-pawn placement,
 /// minor/major placement, and the previous move). Each facet has its own
 /// table indexed by [stm][key]; per-facet values are stored in fixed-point
-/// with scale `CORRHIST_GRAIN` and clamped to `CORRHIST_LIMIT` (±32cp). The
-/// applied correction sums the facets and is capped at `CORR_TOTAL_CAP`.
+/// with scale `CORRHIST_GRAIN` and clamped to `tune.corr_facet_cap` (±32cp by default). The
+/// applied correction sums the facets and is capped at `tune.corr_total_cap`.
 const CORRHIST_SIZE: usize = 16384; // power of two
 const CORR_MASK: usize = CORRHIST_SIZE - 1;
 const CORRHIST_GRAIN: i32 = 256; // fixed-point scale
-const CORRHIST_LIMIT: i32 = CORRHIST_GRAIN * 32; // per-facet cap: ±32cp
-const CORR_TOTAL_CAP: i32 = 64; // cap on the summed correction (cp)
 
 /// A hash-keyed correction table, indexed by [stm][key & CORR_MASK].
 type CorrTable = Box<[[i32; CORRHIST_SIZE]; 2]>;
@@ -376,7 +372,7 @@ impl<'a> SearchState<'a> {
     }
 
     fn update_history(&mut self, m: Move, depth: u8, board: &Board, ply: u8) {
-        let bonus = depth as i32 * depth as i32;
+        let bonus = self.tune.hist_bonus_mult * depth as i32 * depth as i32 / 16;
         let from = m.from_sq().index();
         let to = m.to_sq().index();
 
@@ -411,7 +407,7 @@ impl<'a> SearchState<'a> {
     }
 
     fn update_history_malus(&mut self, m: Move, depth: u8, board: &Board, ply: u8) {
-        let malus = depth as i32 * depth as i32;
+        let malus = self.tune.hist_malus_mult * depth as i32 * depth as i32 / 16;
         let from = m.from_sq().index();
         let to = m.to_sq().index();
 
@@ -464,7 +460,8 @@ impl<'a> SearchState<'a> {
             let ctx = self.ply_context[ply as usize - 1];
             sum += self.learning.cont_corrhist[stm][ctx.piece_kind][ctx.to_sq];
         }
-        let cp = (sum / CORRHIST_GRAIN).clamp(-CORR_TOTAL_CAP, CORR_TOTAL_CAP);
+        let cap = self.tune.corr_total_cap;
+        let cp = (sum / CORRHIST_GRAIN).clamp(-cap, cap);
         cp * self.tune.corrhist_mult / 100
     }
 
@@ -477,11 +474,12 @@ impl<'a> SearchState<'a> {
             1
         };
         let k = crate::eval::corr_keys(board);
-        let scaled = (diff * CORRHIST_GRAIN).clamp(-CORRHIST_LIMIT, CORRHIST_LIMIT);
+        let limit = CORRHIST_GRAIN * self.tune.corr_facet_cap;
+        let scaled = (diff * CORRHIST_GRAIN).clamp(-limit, limit);
         let weight = (depth as i32 + 1).min(16);
         let blend = |e: &mut i32| {
             *e = (*e * (256 - weight) + scaled * weight) / 256;
-            *e = (*e).clamp(-CORRHIST_LIMIT, CORRHIST_LIMIT);
+            *e = (*e).clamp(-limit, limit);
         };
         blend(&mut self.learning.pawn_corrhist[stm][k.pawn as usize & CORR_MASK]);
         blend(&mut self.learning.white_corrhist[stm][k.white as usize & CORR_MASK]);
@@ -554,7 +552,7 @@ impl<'a> SearchState<'a> {
             Some(p) => p,
             None => return,
         };
-        let bonus = depth as i32 * depth as i32;
+        let bonus = self.tune.cap_hist_mult * depth as i32 * depth as i32 / 16;
         let max_val = 16384;
         let entry = &mut self.learning.capture_history[piece.kind.index()][m.to_sq().index()]
             [captured.kind.index()];
@@ -571,7 +569,7 @@ impl<'a> SearchState<'a> {
             Some(p) => p,
             None => return,
         };
-        let malus = depth as i32 * depth as i32;
+        let malus = self.tune.cap_hist_mult * depth as i32 * depth as i32 / 16;
         let max_val = 16384;
         let entry = &mut self.learning.capture_history[piece.kind.index()][m.to_sq().index()]
             [captured.kind.index()];
@@ -1704,11 +1702,14 @@ pub fn iterative_deepening(
             if line_idx == 0 {
                 // Aspiration windows: narrow window with progressive widening
                 let (mut alpha, mut beta) = if depth >= 4 {
-                    (prev_score - 30, prev_score + 30)
+                    (
+                        prev_score - state.tune.asp_window,
+                        prev_score + state.tune.asp_window,
+                    )
                 } else {
                     (Score::NEG_INF.0, Score::INF.0)
                 };
-                let mut delta = 60i32;
+                let mut delta = state.tune.asp_delta;
                 let mut s;
                 loop {
                     pv.clear();
@@ -2611,7 +2612,9 @@ fn alpha_beta(
 
         // Null move pruning
         if depth >= 3 && static_eval >= beta && has_non_pawn_material(board, board.side_to_move) {
-            let null_r = 3 + depth as u32 / 4 + ((static_eval - beta) as u32 / 200).min(3);
+            let null_r = 3
+                + depth as u32 / 4
+                + ((static_eval - beta) as u32 / state.tune.nmp_eval_div as u32).min(3);
             let null_depth = depth.saturating_sub(1 + null_r as u8);
 
             let prev_ep = board.en_passant;
@@ -2653,8 +2656,8 @@ fn alpha_beta(
         // Probcut: if a shallow search on captures beats beta by a margin,
         // the full-depth search is very likely to beat beta too.
         if depth >= 5 && !searching_for_mate {
-            let probcut_beta = beta + 200;
-            if static_eval >= probcut_beta - 100 {
+            let probcut_beta = beta + state.tune.probcut_margin;
+            if static_eval >= probcut_beta - state.tune.probcut_eval_slack {
                 let probcut_depth = depth - 4;
                 let pc_us = board.side_to_move;
                 let captures = chess_core::generate_pseudo_legal_captures(board);
@@ -2741,7 +2744,7 @@ fn alpha_beta(
 
         // Razoring
         if depth <= 3 {
-            let razor_margin = 300 + 200 * depth as i32;
+            let razor_margin = state.tune.razor_base + state.tune.razor_depth_mult * depth as i32;
             if static_eval + razor_margin <= alpha {
                 let qscore = quiescence(board, ply, alpha, beta, pv, state, stop, true);
                 if qscore <= alpha {
@@ -2814,14 +2817,14 @@ fn alpha_beta(
             && depth >= 8
             && tt_depth >= depth - 2
             && tt_flag == TTFlag::LowerBound
-            && tt_score >= alpha + 50;
+            && tt_score >= alpha + state.tune.se_tt_margin;
         let aggressive_gate = singular_mode >= 2
             && depth >= 7
             && tt_depth >= depth - 3
             && tt_flag != TTFlag::UpperBound
             && tt_score >= alpha + 30;
         if singular_mode > 0 && singular_candidate && (conservative_gate || aggressive_gate) {
-            let se_beta = tt_score - 2 * depth as i32;
+            let se_beta = tt_score - state.tune.se_beta_mult * depth as i32 / 16;
             let se_depth = (depth - 1) / 2;
 
             let mut se_pv = PvLine::new();
@@ -2840,7 +2843,7 @@ fn alpha_beta(
 
             if se_score < se_beta {
                 extension = if !is_pv
-                    && se_score < se_beta - DOUBLE_EXT_MARGIN
+                    && se_score < se_beta - state.tune.double_ext_margin
                     && state.double_exts[ply as usize] < MAX_DOUBLE_EXTS
                 {
                     2
@@ -2890,7 +2893,7 @@ fn alpha_beta(
             // SEE pruning for bad captures (extended to depth 7)
             // Must be done BEFORE make_move — SEE reads the pre-move board.
             if depth <= 7 && m.is_capture() {
-                let see_threshold = -30 * depth as i32;
+                let see_threshold = -state.tune.see_capture_margin * depth as i32;
                 if !see::see_ge(board, m, see_threshold) {
                     continue;
                 }
@@ -2908,7 +2911,7 @@ fn alpha_beta(
                         - state.learning.history[us.index()][m.from_sq().index()]
                             [m.to_sq().index()]
                         .max(0)
-                            / 64,
+                            / state.tune.see_quiet_hist_div,
                 )
             {
                 continue;
@@ -2949,8 +2952,8 @@ fn alpha_beta(
                 } else {
                     state.tune.fut_margin_noimp
                 }) * depth as i32
-                    + 50
-                    + (hist + cont / 2) / 64;
+                    + state.tune.fut_base
+                    + (hist + cont / 2) / state.tune.fut_hist_div;
                 if static_eval + futility_margin <= alpha {
                     board.unmake_move(m, captured, prev_castling, prev_ep, prev_halfmove);
                     continue;
@@ -2981,7 +2984,7 @@ fn alpha_beta(
                 && !m.is_capture()
                 && !m.is_promotion()
                 && !searching_for_mate
-                && hist + cont / 2 < -3000 * depth as i32
+                && hist + cont / 2 < -state.tune.hist_prune_margin * depth as i32
             {
                 board.unmake_move(m, captured, prev_castling, prev_ep, prev_halfmove);
                 continue;
@@ -3064,7 +3067,7 @@ fn alpha_beta(
                     reduction += 1;
                 }
                 // Reduce more when eval is below alpha (position looks bad)
-                if !is_pv && static_eval + 150 < alpha {
+                if !is_pv && static_eval + state.tune.lmr_eval_margin < alpha {
                     reduction += 1;
                 }
 
@@ -3438,7 +3441,7 @@ fn quiescence(
     }
 
     // Delta pruning
-    let delta = PieceKind::Queen.value() + 200;
+    let delta = PieceKind::Queen.value() + state.tune.qs_delta_margin;
     if stand_pat + delta < alpha {
         return alpha;
     }
