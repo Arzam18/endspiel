@@ -2676,8 +2676,9 @@ fn alpha_beta(
                         continue;
                     }
 
-                    // Incremental accumulator update for probcut
-                    if state.use_nnue {
+                    // Same ply guard as every other accumulator push: ply 127 would
+                    // write past the 128-deep stack.
+                    if state.use_nnue && (ply as usize) + 1 < MAX_PLY {
                         update_accumulator_for_move(
                             state,
                             board,
