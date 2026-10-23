@@ -27,6 +27,7 @@ assets/
 
 # ── Local-only tooling, analysis & scratch ──
 .claude/
+/AGENTS.md
 /lichess/
 debug_*.py
 debug_*.sh
