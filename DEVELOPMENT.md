@@ -41,7 +41,7 @@ Two backends:
 
 ### Chess960
 
-Rook origins live on `Board::castle_rooks` (one per colour and side, so Double Fischer Random works) unless a FEN overrides them; internal castling still moves king→c/g and rook→d/f. FEN parsing accepts KQkq, X-FEN, and Shredder (`AHah`); emission is X-FEN. With `UCI_Chess960=true`, the UCI layer prints and parses king-takes-own-rook moves. Chess960 skips `OpeningVariety` and the opening time ramp. The net has no Chess960 opening data: a capped SF-labelled 960-opening overlay (endspiel-tools `chess960_opening_campaign.sh`) cut the net's 960 static error from 95 to 63 cp but lost 35 Elo in 960 games (2026-09-29, parked).
+Rook origins live on `Board::castle_rooks` (one per colour and side, so Double Fischer Random works) unless a FEN overrides them; internal castling still moves king→c/g and rook→d/f. FEN parsing accepts KQkq, X-FEN, and Shredder (`AHah`); emission is X-FEN. With `UCI_Chess960=true`, the UCI layer prints and parses king-takes-own-rook moves. Chess960 skips `OpeningVariety` and the opening time ramp. The net has no Chess960 opening data.
 
 ### Strength limit (`chess-engine/src/strength.rs`)
 
@@ -54,7 +54,7 @@ Rook origins live on `Board::castle_rooks` (one per colour and side, so Double F
 | 2000 | 2000 | 4 | 55 | 42.5% → ≈ 1945 |
 | 2500 | 6000 | 3 | 30 | 47.5% → ≈ 2480 |
 
-Recalibrate after a net or major search change with endspiel-tools `scripts/strength_calibrate.sh <binary>` (about an hour at 16 cores). Weakness near 128 is very sensitive (beginner: 117 ≈ 1180, 121 ≈ 965, 125 ≈ 500); the stronger classes are tuned mainly through `max_nodes`.
+Recalibrate after a net or major search change. Weakness near 128 is very sensitive (beginner: 117 ≈ 1180, 121 ≈ 965, 125 ≈ 500); the stronger classes are tuned mainly through `max_nodes`.
 
 ### Syzygy (`chess-engine/src/syzygy.rs`)
 
@@ -122,29 +122,7 @@ PR checklist:
 `endspiel bench` = depth-14 over 7 pinned positions, 1 thread, fixed hash → **deterministic** node count, used to detect whether the search tree changed:
 
 1. `endspiel bench` on parent commit → `Nodes: X`; build branch, same → `Nodes: Y`.
-2. `X == Y`: behaviour-neutral or dead/guarded code (investigate for features). `X != Y`: tree changed — improvement still needs game testing (see **Promotion gate**).
-
-## Promotion gate (nets and engine changes)
-
-Every candidate — a replacement `crates/chess-nnue/nets/default.nnue` or a search/eval
-change — is gated by one fastchess run: **candidate vs Stockfish 19 at a fixed
-`nodes=10000` per move, 1000 games, no opening book** (startpos only; the candidate uses
-`OpeningVariety=110` for variety since Stockfish is deterministic at fixed nodes).
-`tc=10+0.1` for the candidate, `Hash=64`, `Threads=1` on both, concurrency 16.
-**Promote only if the candidate scores ≥ 45%.** Reference: `c5e2aaf` scored 55.55%
-(+38.7 ± 13.9 Elo) on 2026-09-27; `d665032` had scored 42.5% on 2026-09-24. Single search
-changes are filtered first by SPRT against their parent (endspiel-tools `scripts/sprt.sh`).
-
-```bash
-fastchess \
-  -engine cmd=target/release/endspiel name=candidate option.Hash=64 option.Threads=1 option.OpeningVariety=110 \
-  -engine cmd=stockfish name=sf19-n10000 nodes=10000 option.Hash=64 option.Threads=1 \
-  -each tc=10+0.1 -rounds 500 -games 2 -concurrency 16 -recover
-```
-
-Paste the final `Games/Wins/Losses/Draws/Points/Elo` line in the commit or PR. For a net,
-note any architecture size change (`build.rs` checks it) and include updated
-`WDL_A`/`WDL_B` if the win-rate ↔ centipawn mapping shifted.
+2. `X == Y`: behaviour-neutral or dead/guarded code (investigate for features). `X != Y`: tree changed — improvement still needs game testing.
 
 ## Syzygy Tablebases
 
