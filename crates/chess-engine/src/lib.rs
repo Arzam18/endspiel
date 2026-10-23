@@ -115,67 +115,67 @@ macro_rules! tune_params {
 
 tune_params! {
     /// LMR base ×100
-    lmr_base: 24, 0..=150;
+    lmr_base: 23, 0..=150;
     /// LMR divisor ×100
-    lmr_div: 156, 100..=400;
+    lmr_div: 178, 100..=400;
     /// Divisor for history score's influence on LMR reduction
-    hist_lmr_div: 1055, 300..=8000;
+    hist_lmr_div: 1218, 300..=8000;
     /// LMR: eval this far below alpha at non-PV nodes reduces one more ply
-    lmr_eval_margin: 150, 30..=400;
+    lmr_eval_margin: 156, 30..=400;
     /// Reverse futility pruning margin per depth when improving
     rfp_margin_imp: 70, 20..=200;
     /// Reverse futility pruning margin per depth when not improving
-    rfp_margin_noimp: 98, 20..=250;
+    rfp_margin_noimp: 92, 20..=250;
     /// Futility pruning margin per depth when improving
     fut_margin_imp: 41, 10..=200;
     /// Futility pruning margin per depth when not improving
-    fut_margin_noimp: 67, 10..=200;
+    fut_margin_noimp: 73, 10..=200;
     /// Futility pruning base margin
-    fut_base: 50, 0..=200;
+    fut_base: 54, 0..=200;
     /// Futility: history divisor (bigger = less history influence)
-    fut_hist_div: 64, 16..=256;
+    fut_hist_div: 62, 16..=256;
     /// SEE quiet-move pruning margin per depth
     see_quiet_margin: 13, 0..=100;
     /// SEE quiet-move pruning: history divisor
-    see_quiet_hist_div: 64, 16..=256;
+    see_quiet_hist_div: 61, 16..=256;
     /// SEE capture pruning margin per depth
-    see_capture_margin: 30, 0..=150;
+    see_capture_margin: 38, 0..=150;
     /// History pruning threshold per depth
-    hist_prune_margin: 3000, 500..=10000;
+    hist_prune_margin: 3402, 500..=10000;
     /// Null move: eval-above-beta per extra ply of reduction
-    nmp_eval_div: 200, 50..=600;
+    nmp_eval_div: 191, 50..=600;
     /// Probcut margin above beta
-    probcut_margin: 200, 50..=400;
+    probcut_margin: 197, 50..=400;
     /// Probcut: static eval may sit this far below the probcut beta
-    probcut_eval_slack: 100, 0..=300;
+    probcut_eval_slack: 104, 0..=300;
     /// Razoring base margin
-    razor_base: 300, 50..=800;
+    razor_base: 295, 50..=800;
     /// Razoring margin per depth
-    razor_depth_mult: 200, 50..=500;
+    razor_depth_mult: 204, 50..=500;
     /// Singular beta = TT score − se_beta_mult × depth / 16
-    se_beta_mult: 32, 8..=96;
+    se_beta_mult: 33, 8..=96;
     /// Singular extension: TT score must exceed alpha by this much (non-PV)
-    se_tt_margin: 50, 0..=150;
+    se_tt_margin: 42, 0..=150;
     /// Double extension when every alternative fails this far below singular beta
     double_ext_margin: 25, 0..=100;
     /// Quiet/continuation history bonus = mult × depth² / 16
     hist_bonus_mult: 16, 4..=64;
     /// Quiet/continuation history malus = mult × depth² / 16
-    hist_malus_mult: 16, 4..=64;
+    hist_malus_mult: 18, 4..=64;
     /// Capture history bonus/malus = mult × depth² / 16
-    cap_hist_mult: 16, 4..=64;
+    cap_hist_mult: 15, 4..=64;
     /// Aspiration window half-width at the start of an iteration
-    asp_window: 30, 8..=100;
+    asp_window: 28, 8..=100;
     /// Aspiration widening step after the first fail
-    asp_delta: 60, 10..=200;
+    asp_delta: 56, 10..=200;
     /// Quiescence delta pruning margin above a queen
-    qs_delta_margin: 200, 0..=600;
+    qs_delta_margin: 183, 0..=600;
     /// Corrhist correction multiplier ×100 (0 disables)
-    corrhist_mult: 82, 0..=300;
+    corrhist_mult: 85, 0..=300;
     /// Corrhist: cap on the summed correction (cp)
-    corr_total_cap: 64, 16..=256;
+    corr_total_cap: 66, 16..=256;
     /// Corrhist: cap per facet (cp)
-    corr_facet_cap: 32, 8..=128;
+    corr_facet_cap: 33, 8..=128;
 }
 
 impl Default for SearchParams {
