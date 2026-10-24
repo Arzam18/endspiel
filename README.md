@@ -64,7 +64,8 @@ engine lists; details in [ABOUT.md](ABOUT.md).
 - **Contempt** and configurable time management (`Move Overhead`, `Slow Mover`); repeating time controls (`movestogo`, e.g. 40 moves in 15 min) are budgeted per period
 - **Performance** — one universal x86-64 executable detects the host CPU at
   startup and dispatches its hot NNUE inference and accumulator operations to
-  AVX512ICL, AVX-512, AVX2, or the portable fallback. AArch64 uses NEON;
+  AVX512ICL, AVX-512, AVX2, or the portable fallback. AArch64 uses NEON, with
+  the dotprod L1 kernel on cores that have it (`bench` prints the tier);
   selected release builds also use profile-guided optimisation and fat LTO
 - **Cross-platform** — Linux x86_64/ARM64, Windows x86_64/ARM64, macOS Apple Silicon
 - **Self-contained binary** — no runtime dependencies, no external net file
@@ -107,7 +108,7 @@ command to verify the selected backend; it is printed on the first line.
 | macOS Apple Silicon | `endspiel-mac-arm64` | `apple-m1`, PGO-optimised |
 | Windows ARM64 | `endspiel-win-arm64.exe` | generic ARM64 |
 | Raspberry Pi 5 | `endspiel-linux-arm64-pi5` | `cortex-a76`, fat LTO + PGO; needs Raspberry Pi OS (Trixie / Debian 13) or newer — glibc ≥ 2.39 |
-| Android arm64 | `endspiel-android-arm64.apk` | `arm64-v8a`, minSdk 24 — installs like an app; pick "Endspiel" as a UCI engine in DroidFish / Chess for Android |
+| Android arm64 | `endspiel-android-arm64.apk` | `arm64-v8a` generic, fat LTO, minSdk 24; NNUE dotprod selected automatically — installs like an app; pick "Endspiel" as a UCI engine in DroidFish / Chess for Android |
 
 **Raspberry Pi 5.** Any RAM tier runs the engine; hash size is the only
 thing that scales with it. The default is 128 MB per thread, capped at 1/16 of

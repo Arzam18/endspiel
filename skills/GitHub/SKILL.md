@@ -20,7 +20,9 @@ Build targets and flags:
 | x86_64-unknown-linux-gnu | endspiel-linux-x64        | -C target-cpu=x86-64-v2 |
 | aarch64-apple-darwin     | endspiel-mac-arm64        | -C target-cpu=apple-m1  |
 | x86_64-pc-windows-msvc   | endspiel-win-x64.exe      | -C target-cpu=x86-64-v2 |
-| aarch64-pc-windows-msvc  | endspiel-win-arm64.exe    | (none)                  |
+| aarch64-pc-windows-msvc  | endspiel-win-arm64.exe    | -C target-cpu=generic   |
+| aarch64-unknown-linux-gnu | endspiel-linux-arm64-pi5 | -C target-cpu=cortex-a76 (fat LTO + PGO) |
+| aarch64-linux-android    | endspiel-android-arm64.apk | `scripts/build-android.sh` (generic, fat LTO), then `scripts/build-android-apk.sh` |
 
 The x86-64 artifacts are universal binaries. Keep their v2 baseline: their
 NNUE hot paths select AVX2, AVX-512, or AVX512ICL at runtime. Do not restore
