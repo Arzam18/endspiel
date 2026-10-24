@@ -13,7 +13,7 @@ fn add_row(values: &mut [i16; HIDDEN_SIZE], row: &[i16; HIDDEN_SIZE]) {
         match simd_backend() {
             SimdBackend::Avx512Icl | SimdBackend::Avx512 => return add_row_avx512(values, row),
             SimdBackend::Avx2 => return add_row_avx2(values, row),
-            SimdBackend::Scalar | SimdBackend::Neon => {}
+            SimdBackend::Scalar | SimdBackend::Neon | SimdBackend::NeonDotprod => {}
         }
     }
     add_row_scalar(values, row);
@@ -26,7 +26,7 @@ fn sub_row(values: &mut [i16; HIDDEN_SIZE], row: &[i16; HIDDEN_SIZE]) {
         match simd_backend() {
             SimdBackend::Avx512Icl | SimdBackend::Avx512 => return sub_row_avx512(values, row),
             SimdBackend::Avx2 => return sub_row_avx2(values, row),
-            SimdBackend::Scalar | SimdBackend::Neon => {}
+            SimdBackend::Scalar | SimdBackend::Neon | SimdBackend::NeonDotprod => {}
         }
     }
     sub_row_scalar(values, row);
@@ -45,7 +45,7 @@ fn replace_row(
                 return replace_row_avx512(values, old_row, new_row);
             }
             SimdBackend::Avx2 => return replace_row_avx2(values, old_row, new_row),
-            SimdBackend::Scalar | SimdBackend::Neon => {}
+            SimdBackend::Scalar | SimdBackend::Neon | SimdBackend::NeonDotprod => {}
         }
     }
     for ((value, &old), &new) in values.iter_mut().zip(old_row).zip(new_row) {
@@ -247,7 +247,7 @@ unsafe fn apply_rows_raw(
                 return apply_rows_avx512(dst, src, net, subs, adds);
             }
             SimdBackend::Avx2 => return apply_rows_avx2(dst, src, net, subs, adds),
-            SimdBackend::Scalar | SimdBackend::Neon => {}
+            SimdBackend::Scalar | SimdBackend::Neon | SimdBackend::NeonDotprod => {}
         }
     }
     unsafe { apply_rows_scalar(dst, src, net, subs, adds) }

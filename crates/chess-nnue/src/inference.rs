@@ -8,7 +8,7 @@ use crate::{
     PAIR_SIZE,
 };
 
-/// Best x86 SIMD tier available to the current process.
+/// Best SIMD tier available to the current process.
 ///
 /// Keep this in sync with the requirements used by Stockfish's universal
 /// x86-64 dispatcher.  In particular, AVX512ICL means the complete feature
@@ -17,6 +17,7 @@ use crate::{
 pub enum SimdBackend {
     Scalar,
     Neon,
+    NeonDotprod,
     Avx2,
     Avx512,
     Avx512Icl,
@@ -27,6 +28,7 @@ impl SimdBackend {
         match self {
             Self::Scalar => "scalar",
             Self::Neon => "NEON",
+            Self::NeonDotprod => "NEON+dotprod",
             Self::Avx2 => "AVX2",
             Self::Avx512 => "AVX-512",
             Self::Avx512Icl => "AVX512ICL",
@@ -66,6 +68,9 @@ fn detect_simd_backend() -> SimdBackend {
     }
     #[cfg(target_arch = "aarch64")]
     {
+        if std::arch::is_aarch64_feature_detected!("dotprod") {
+            return SimdBackend::NeonDotprod;
+        }
         SimdBackend::Neon
     }
     #[cfg(not(target_arch = "aarch64"))]
@@ -98,7 +103,7 @@ fn pairwise_products(acc: &[i16; HIDDEN_SIZE], out: &mut [u8]) {
                 return pairwise_products_avx512(acc, out);
             }
             SimdBackend::Avx2 => return pairwise_products_avx2(acc, out),
-            SimdBackend::Scalar | SimdBackend::Neon => {}
+            SimdBackend::Scalar | SimdBackend::Neon | SimdBackend::NeonDotprod => {}
         }
     }
     #[cfg(target_arch = "aarch64")]
@@ -211,7 +216,7 @@ fn nonzero_chunks(input: &L1Input, out: &mut [u16; L1_CHUNKS]) -> usize {
                 return nonzero_chunks_avx512(input, out);
             }
             SimdBackend::Avx2 => return nonzero_chunks_avx2(input, out),
-            SimdBackend::Scalar | SimdBackend::Neon => {}
+            SimdBackend::Scalar | SimdBackend::Neon | SimdBackend::NeonDotprod => {}
         }
     }
     nonzero_chunks_scalar(input, out)
@@ -308,15 +313,15 @@ fn l1_sparse_dot(input: &L1Input, chunks: &[u16], blocks: &[L1Block]) -> [i32; L
             SimdBackend::Avx512Icl => return l1_sparse_dot_vnni(input, chunks, blocks),
             SimdBackend::Avx512 => return l1_sparse_dot_avx512(input, chunks, blocks),
             SimdBackend::Avx2 => return l1_sparse_dot_avx2(input, chunks, blocks),
-            SimdBackend::Scalar | SimdBackend::Neon => {}
+            SimdBackend::Scalar | SimdBackend::Neon | SimdBackend::NeonDotprod => {}
         }
     }
     #[cfg(target_arch = "aarch64")]
-    {
-        if std::arch::is_aarch64_feature_detected!("dotprod") {
-            return unsafe { l1_sparse_dot_neon_dotprod(input, chunks, blocks) };
+    unsafe {
+        if simd_backend() == SimdBackend::NeonDotprod {
+            return l1_sparse_dot_neon_dotprod(input, chunks, blocks);
         }
-        return unsafe { l1_sparse_dot_neon(input, chunks, blocks) };
+        return l1_sparse_dot_neon(input, chunks, blocks);
     }
     #[allow(unreachable_code)]
     l1_sparse_dot_scalar(input, chunks, blocks)
