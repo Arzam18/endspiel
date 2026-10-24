@@ -236,11 +236,15 @@ stdin/stdout like the desktop build and runs under Termux or via `adb shell`.
 ```bash
 rustup target add aarch64-linux-android
 cargo install cargo-ndk
-export ANDROID_NDK_HOME=/path/to/android-ndk   # r23+
+export ANDROID_NDK_HOME=/path/to/android-ndk   # r23+ (default: newest under ~/Android/Sdk/ndk)
 
 scripts/build-android.sh
 # binary: target/aarch64-linux-android/release/endspiel
 ```
+
+One portable ARMv8-A binary: the NNUE picks its NEON or NEON+dotprod kernels at
+runtime (`endspiel bench` prints which). The build uses fat LTO; `PGO=1` adds PGO
+(training run under `qemu-aarch64`), which measured slower on a Snapdragon 8 Elite.
 
 On-device the engine auto-tunes its defaults: `Threads` is the performance-core
 count of the SoC, and `Hash` is ~128 MB per such core, capped at ~1/16 of
