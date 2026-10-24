@@ -11,12 +11,13 @@
 //! is always the best line; as it nears 128 the score gaps all but vanish and
 //! the random term decides, so weaker classes play worse moves more often.
 //!
-//! Calibrated 2026-10-01 against Stockfish 19 `UCI_LimitStrength` at the same
-//! `UCI_Elo` (the 1000 class vs SF 1320), 60+0.6, 100 games per class with
-//! endspiel-tools `scripts/strength_calibrate.sh`: 1000 → ≈ 965, 1500 → ≈ 1475,
-//! 2000 → ≈ 1945, 2500 → ≈ 2480. Near weakness 128 the class is very sensitive
-//! (beginner at 117 ≈ 1180, 121 ≈ 965, 122 ≈ 890, 125 ≈ 500); the stronger
-//! classes are tuned mainly through `max_nodes`.
+//! Calibrated 2026-10-24 (e4fbf56) against Stockfish 19 `UCI_LimitStrength` at
+//! the same `UCI_Elo` (the 1000 class vs SF 1320), 60+0.6, 100 games per class
+//! (200 for 1500): 1000 → ≈ 1050, 1500 → ≈ 1515, 2000 → ≈ 1955, 2500 → ≈ 2495.
+//! The search tune left the hobby class at 500 nodes ≈ 1405, hence 750 nodes.
+//! Near weakness 128 the class is very sensitive (beginner at 117 ≈ 1180,
+//! 121 ≈ 965, 122 ≈ 890, 125 ≈ 500); the stronger classes are tuned mainly
+//! through `max_nodes`.
 
 /// Lowest `UCI_Elo`.
 pub const ELO_MIN: i32 = 1000;
@@ -52,7 +53,7 @@ pub const LEVELS: [StrengthLevel; 4] = [
     StrengthLevel {
         elo: 1500,
         name: "hobby",
-        max_nodes: 500,
+        max_nodes: 750,
         multi_pv: 6,
         weakness: 85,
     },
