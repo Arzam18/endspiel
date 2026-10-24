@@ -962,9 +962,10 @@ impl UciHandler {
             }
             #[cfg(feature = "tune")]
             tune_name
-                if value.as_deref().and_then(|v| v.trim().parse::<i32>().ok()).is_some_and(
-                    |n| self.engine.set_tune_param(tune_name, n),
-                ) => {}
+                if value
+                    .as_deref()
+                    .and_then(|v| v.trim().parse::<i32>().ok())
+                    .is_some_and(|n| self.engine.set_tune_param(tune_name, n)) => {}
             _ => {
                 log::debug!("Unknown option: {}", name);
             }
