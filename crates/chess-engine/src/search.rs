@@ -4020,26 +4020,34 @@ mod tests {
 
     #[test]
     fn mate_on_the_hundredth_ply_beats_the_fifty_move_draw() {
-        // Halfmove clock 99: Qb8# reaches 100 with Black mated, which is a win,
-        // not a 50-move draw; a3 resets the clock but only keeps a won position.
-        let board = Board::from_fen("7k/8/6K1/8/8/8/P7/1Q6 w - - 99 120").unwrap();
-        let net = NnueNetwork::embedded();
-        let stop = Arc::new(AtomicBool::new(false));
-        let tt = Arc::new(SharedTT::new(16));
-        let params = SearchParams {
-            max_depth: 6,
-            use_nnue: true,
-            ..Default::default()
-        };
-        let result = iterative_deepening(
-            &board, &params, &stop, &tt, None, 0, &net, None, None, None, None, None,
-        );
-        assert_eq!(result.best_move.to_uci(), "b1b8");
-        assert!(
-            result.score.is_mate() && result.score.0 > 0,
-            "score {:?}",
-            result.score
-        );
+        // A full search needs more than Windows' 1 MB default test stack.
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                // Halfmove clock 99: Qb8# reaches 100 with Black mated, which is a win,
+                // not a 50-move draw; a3 resets the clock but only keeps a won position.
+                let board = Board::from_fen("7k/8/6K1/8/8/8/P7/1Q6 w - - 99 120").unwrap();
+                let net = NnueNetwork::embedded();
+                let stop = Arc::new(AtomicBool::new(false));
+                let tt = Arc::new(SharedTT::new(16));
+                let params = SearchParams {
+                    max_depth: 6,
+                    use_nnue: true,
+                    ..Default::default()
+                };
+                let result = iterative_deepening(
+                    &board, &params, &stop, &tt, None, 0, &net, None, None, None, None, None,
+                );
+                assert_eq!(result.best_move.to_uci(), "b1b8");
+                assert!(
+                    result.score.is_mate() && result.score.0 > 0,
+                    "score {:?}",
+                    result.score
+                );
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
