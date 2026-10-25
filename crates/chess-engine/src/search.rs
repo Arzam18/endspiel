@@ -1968,10 +1968,10 @@ pub fn iterative_deepening(
             // PV instability: +8% per change, up to +40%
             let instability_bonus = (recent_pv_changes as u64).min(5) * 80;
 
-            // Score drop: +5% per 25cp drop, up to +40%
+            // Score drop: +5% per 25 internal units (~0.1 pawn) of drop, up to +40%
             let drop_bonus = ((score_drop as u64) / 25).min(8) * 50;
 
-            // Score volatility: +6% per 30cp swing, up to +30%
+            // Score volatility: +6% per 30 internal units (~0.11 pawn) of swing, up to +30%
             let volatility_bonus = ((recent_score_swing as u64) / 30).min(5) * 60;
 
             // Aspiration failures: +8% per failure, up to +32%
@@ -2041,13 +2041,17 @@ pub fn iterative_deepening(
             // Score-aware adjustment:
             // - Spend less in clearly decided and stable positions (won/lost)
             // - Spend more in unclear or volatile positions.
+            // Scores are internal units: 262 = one displayed pawn (WDL_B in
+            // chess-uci's handler.rs), so "decided" means 5 and 3 displayed pawns,
+            // the swing gates 40 / 60 are ~0.15 / ~0.23 pawn, and "unclear" means
+            // within ~0.2 / ~0.35 pawn of equal with a swing of ~0.13 / ~0.1 pawn.
             let eval_abs = best_score.0.saturating_abs() as u64;
             let eval_adjust: i64 = if best_score.is_mate() {
                 // Once mate is visible, prioritize conversion speed.
                 -220
-            } else if eval_abs >= 500 && best_move_stability >= 2 && recent_score_swing <= 40 {
+            } else if eval_abs >= 1310 && best_move_stability >= 2 && recent_score_swing <= 40 {
                 -220
-            } else if eval_abs >= 300 && best_move_stability >= 2 && recent_score_swing <= 60 {
+            } else if eval_abs >= 786 && best_move_stability >= 2 && recent_score_swing <= 60 {
                 -140
             } else if eval_abs <= 50 && recent_score_swing >= 35 {
                 180
