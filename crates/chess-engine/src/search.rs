@@ -4051,6 +4051,64 @@ mod tests {
     }
 
     #[test]
+    fn fifty_move_counter_damps_the_static_eval() {
+        // Same position, counter 0 vs 88: the eval moves 88/200 of the way to a draw.
+        let net = NnueNetwork::embedded();
+        let tt = Arc::new(SharedTT::new(1));
+        let eval_at = |halfmove_clock: u32| {
+            let fen = format!("8/8/8/6p1/2k1K3/R6P/p2r4/8 w - - {halfmove_clock} 125");
+            let board = Board::from_fen(&fen).expect("valid test FEN");
+            let mut history = PersistentHistory::new();
+            let mut state = nnue_test_state(&net, &tt, &mut history);
+            evaluate_for_side(&board, &mut state, 0, None).1
+        };
+        let fresh = eval_at(0);
+        assert!(fresh.abs() >= 200, "needs a clear edge, got {fresh}");
+        assert_eq!(eval_at(88), fresh - fresh * 88 / 200);
+    }
+
+    #[test]
+    #[cfg(not(debug_assertions))]
+    fn holds_the_fifty_move_draw_from_lichess_upwofwhw() {
+        // lichess.org/upWOfwhW, move 125: K+R+P vs K+R+2P, lost on the board, but the
+        // counter is at 88. Only 125.Ke5 holds (7-man TB: Black then needs 13 plies to
+        // capture or push, one more than are left); every rook move, the game's
+        // 125.Ra7?? included, lets Black reset in time. Needs the game history and the
+        // 6-man tables that score the positions after Black's captures and pawn moves.
+        let _guard = crate::syzygy::syzygy_test_guard();
+        let path = syzygy_path();
+        if !path.exists() {
+            return;
+        }
+        let tb = SyzygyTB::new(path.to_string_lossy().as_ref()).expect("load syzygy tables");
+        // Full game up to and including 124...Rd2 (White to move 125).
+        let moves = "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 g8f6 e1g1 f8e7 f1e1 b7b5 a4b3 e8g8 a2a4 \
+                     b5b4 d2d4 d7d6 d4e5 c6e5 f3e5 d6e5 d1d8 f8d8 b1d2 e7c5 d2f3 c5d6 c1g5 a6a5 \
+                     a1d1 c8a6 h2h3 a8c8 d1d2 a6b7 b3d5 f6d5 g5d8 d5f4 d8g5 f4e6 d2d1 f7f6 g5c1 \
+                     g8f7 f3d2 e6d4 d2b3 d4c2 e1e2 c2d4 b3d4 e5d4 d1d4 f7e6 d4d1 c7c5 f2f4 b7c6 \
+                     e4e5 d6c7 e5f6 e6f6 b2b3 c5c4 b3c4 c6a4 c1b2 f6f7 d1d5 g7g6 f4f5 a4c6 f5g6 \
+                     h7g6 d5d1 c7b6 c4c5 b6c5 g1h1 a5a4 d1f1 f7g8 f1c1 a4a3 c1c5 c6g2 h1g2 c8c5 \
+                     b2a3 b4a3 e2e8 g8f7 e8a8 c5c3 a8a6 c3c2 g2f3 a3a2 f3e3 f7e7 e3f3 c2h2 f3e4 \
+                     e7d7 e4d4 d7c7 d4c4 c7b7 a6a5 b7b6 a5a8 h2c2 c4b3 c2g2 b3c4 g2h2 c4b4 b6c6 \
+                     b4c4 c6d7 c4d4 d7e6 d4e4 e6f6 a8a5 h2f2 e4d4 f2g2 d4e4 g2h2 e4f3 f6f7 f3f4 \
+                     f7e7 f4e4 e7d7 e4d4 d7c7 d4c4 c7b6 a5a8 h2c2 c4b3 c2g2 b3b4 b6c6 b4c4 c6b7 \
+                     a8a3 g2d2 a3a5 b7c7 a5a8 c7d6 c4c3 d2h2 c3d4 g6g5 a8a6 d6c7 d4c4 c7b7 a6a5 \
+                     b7b6 a5a8 h2d2 c4c3 d2g2 c3b4 b6c7 b4c4 g2h2 a8a6 c7b7 a6a3 h2c2 c4b3 c2f2 \
+                     b3c4 b7b6 a3a8 f2c2 c4b4 b6c6 b4b3 c2f2 b3c4 c6b7 a8a5 f2h2 a5a3 h2e2 a3a5 \
+                     b7b6 a5a8 b6c6 a8a7 c6b6 a7a8 b6c6 a8a6 c6d7 c4d3 e2g2 a6a7 d7d6 d3d4 g2d2 \
+                     d4c3 d2g2 c3d4 g2d2 d4e3 d2b2 e3d4 b2h2 a7a6 d6d7 a6a8 h2c2 d4e3 c2b2 e3d3 \
+                     b2f2 a8a6 f2g2 d3c3 g2g3 c3d4 g3g2 d4e3 d7c7 a6a8 c7b7 a8a5 g2h2 e3e4 b7b6 \
+                     a5a8 b6b5 e4f3 h2b2 f3e4 b5c4 a8a3 b2d2";
+        let result = search_game_with_syzygy(moves, 20, Some(tb), true);
+        assert_eq!(result.best_move.to_uci(), "e4e5", "score={}", result.score);
+        assert!(
+            result.score.0.abs() <= 50,
+            "should see the 50-move draw, got {}",
+            result.score
+        );
+    }
+
+    #[test]
     fn search_moves_restrict_the_root() {
         // A full search needs more than Windows' 1 MB default test stack.
         std::thread::Builder::new()
