@@ -2386,6 +2386,14 @@ fn draw_score(state: &SearchState, ply: u8) -> i32 {
     }
 }
 
+/// The 50-move rule draws at a halfmove clock of 100, unless the move that
+/// reached it delivered mate: checkmate takes precedence (FIDE 9.3), so a mated
+/// side to move falls through to the normal search, which scores the mate.
+fn is_fifty_move_draw(board: &Board) -> bool {
+    board.halfmove_clock >= 100
+        && !(chess_core::is_in_check(board) && chess_core::generate_legal_moves(board).is_empty())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn alpha_beta(
     board: &mut Board,
@@ -2419,7 +2427,7 @@ fn alpha_beta(
 
     // Draw detection
     if ply > 0 {
-        if board.halfmove_clock >= 100 {
+        if is_fifty_move_draw(board) {
             return draw_score(state, ply);
         }
         // Twofold in the current search path: standard practice since the
@@ -3277,7 +3285,7 @@ fn quiescence(
     // repetition cycle and quiescence is entered without going back through
     // alpha_beta's draw check).
     if ply > 0 {
-        if board.halfmove_clock >= 100 {
+        if is_fifty_move_draw(board) {
             return draw_score(state, ply);
         }
         if board.is_twofold_in_search(state.game_ply) {
@@ -3717,6 +3725,10 @@ fn evaluate_for_side(
         }
     };
     let unadjusted = (use_net || !state.use_nnue).then_some(eval);
+    // Damp the eval toward a draw as the 50-move counter runs, so a stable edge
+    // still prefers moves that make progress (reset the counter) over shuffling.
+    // After the TT value: the counter is not part of the TT key.
+    let eval = eval - eval * i32::from(board.halfmove_clock) / 200;
     // Nudge the static eval by the learned correction for this position.
     (unadjusted, eval + state.correction(board, ply))
 }
@@ -3835,7 +3847,7 @@ fn sanitize_pv(board: &Board, pv: &[Move]) -> Vec<Move> {
         // (fastchess) warn when the PV includes the move that triggers the
         // threefold or 50-move rule, because nothing after it can legally
         // be played.
-        if b.halfmove_clock >= 100 || b.is_repetition() {
+        if is_fifty_move_draw(&b) || b.is_repetition() {
             break;
         }
         result.push(m);
@@ -4004,6 +4016,30 @@ mod tests {
             .unwrap()
             .join()
             .unwrap();
+    }
+
+    #[test]
+    fn mate_on_the_hundredth_ply_beats_the_fifty_move_draw() {
+        // Halfmove clock 99: Qb8# reaches 100 with Black mated, which is a win,
+        // not a 50-move draw; a3 resets the clock but only keeps a won position.
+        let board = Board::from_fen("7k/8/6K1/8/8/8/P7/1Q6 w - - 99 120").unwrap();
+        let net = NnueNetwork::embedded();
+        let stop = Arc::new(AtomicBool::new(false));
+        let tt = Arc::new(SharedTT::new(16));
+        let params = SearchParams {
+            max_depth: 6,
+            use_nnue: true,
+            ..Default::default()
+        };
+        let result = iterative_deepening(
+            &board, &params, &stop, &tt, None, 0, &net, None, None, None, None, None,
+        );
+        assert_eq!(result.best_move.to_uci(), "b1b8");
+        assert!(
+            result.score.is_mate() && result.score.0 > 0,
+            "score {:?}",
+            result.score
+        );
     }
 
     #[test]
