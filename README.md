@@ -171,13 +171,13 @@ sustained engine load the SoC will thermally throttle without a fan.
 | `Move Overhead` | 20 | Time safety margin in ms |
 | `Slow Mover` | 100 | Time usage scaling (%) — >100 thinks longer, <100 plays faster |
 | `Ponder` | false | Think on the opponent's time; the GUI toggles this and drives `go ponder` / `ponderhit` |
-| `Contempt` | 20 | Draw avoidance in centipawns |
+| `Contempt` | 20 | Draw avoidance, in internal eval units (320 = one displayed pawn, so 20 ≈ 6 cp) |
 | `EvalFile` | *(embedded)* | Path to an external `.nnue` / `quantised.bin` net |
 | `BookFile` | *(disabled)* | Path to an opening book: Polyglot `.bin`, EPD `.epd`, or PGN `.pgn` (auto-detected by extension) |
 | `SyzygyPath` | *(disabled)* | Path to Syzygy tablebase directory |
 | `MultiPV` | 1 | Number of principal variations to report (1–256) |
-| `OpeningVariety` | 0 | Opening spice: 0 = off; otherwise pick at random among MultiPV moves within this many centipawns of the best, for the first 8 plies of standard chess (ignored in Chess960) |
-| `UCI_ShowWDL` | false | Append `wdl <win> <draw> <loss>` (0–1000) to each info line |
+| `OpeningVariety` | 0 | Opening spice: 0 = off; otherwise pick at random among MultiPV moves within this many internal eval units of the best (320 = one displayed pawn), for the first 8 plies of standard chess (ignored in Chess960) |
+| `UCI_ShowWDL` | false | Append `wdl <win> <draw> <loss>` (0–1000) to each info line; a displayed +1.00 is a 50% win chance |
 | `UCI_Chess960` | false | Chess960 move notation: castling is sent and read as king-takes-own-rook (GUIs set this for Chess960 games) |
 | `UCI_LimitStrength` | false | Play at the `UCI_Elo` class instead of full strength |
 | `UCI_Elo` | 3000 | Strength class when `UCI_LimitStrength` is on: snaps to the nearest of 1000 / 1500 / 2000 / 2500; 3000 = full strength |

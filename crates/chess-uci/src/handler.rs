@@ -856,7 +856,7 @@ impl UciHandler {
                     && let Ok(cp) = v.trim().parse::<i32>()
                 {
                     self.engine.set_contempt(cp);
-                    log::info!("Contempt set to {} cp", self.engine.contempt());
+                    log::info!("Contempt set to {} (internal units)", self.engine.contempt());
                 }
             }
             "bookfile" => {
