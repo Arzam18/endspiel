@@ -14,9 +14,9 @@ use crate::protocol::{GoParams, UciCommand, UciInfo, UciOptionDef, UciOptionType
 /// P(loss) = sigmoid((−s − a) / b), so `WDL_A` is a 50% win chance and the
 /// displayed cp unit (100 cp = `WDL_A`, Stockfish's convention).
 /// Re-fit on self-play SPRT games after each net promotion with endspiel-tools
-/// `scripts/wdl_fit_pgn.py`. Net 7ea9e2d4: 3.85M positions, 5+0.05 UHO games.
-const WDL_A: f64 = 320.0;
-const WDL_B: f64 = 120.0;
+/// `scripts/wdl_fit_pgn.py`. Net 7ea9e2d4: 0.20M positions, 30+0.3 UHO self-play (5+0.05 gave 320 / 120).
+const WDL_A: f64 = 270.0;
+const WDL_B: f64 = 80.0;
 
 const ENGINE_NAME: &str = "Endspiel";
 
@@ -1154,15 +1154,15 @@ mod tests {
 
     #[test]
     fn normal_scores_are_normalized_for_display() {
-        assert_eq!(normalize_display_score(Score(320)), Score(100));
-        assert_eq!(normalize_display_score(Score(-160)), Score(-50));
+        assert_eq!(normalize_display_score(Score(270)), Score(100));
+        assert_eq!(normalize_display_score(Score(-135)), Score(-50));
     }
 
     #[test]
     fn wdl_is_a_coin_flip_win_at_one_displayed_pawn_and_drawish_at_zero() {
-        assert_eq!(score_to_wdl(320).0, 500);
-        assert_eq!(score_to_wdl(-320).2, 500);
-        assert_eq!(score_to_wdl(0), (65, 870, 65));
+        assert_eq!(score_to_wdl(270).0, 500);
+        assert_eq!(score_to_wdl(-270).2, 500);
+        assert_eq!(score_to_wdl(0), (33, 934, 33));
     }
 
     #[test]

@@ -2041,11 +2041,11 @@ pub fn iterative_deepening(
             // Score-aware adjustment:
             // - Spend less in clearly decided and stable positions (won/lost)
             // - Spend more in unclear or volatile positions.
-            // Scores are internal units: 320 = one displayed pawn (WDL_A in
-            // chess-uci's handler.rs), so "decided" means ~4.1 and ~2.5 displayed
-            // pawns, the swing gates 40 / 60 are ~0.13 / ~0.19 pawn, and "unclear"
-            // means within ~0.16 / ~0.28 pawn of equal with a swing of ~0.11 /
-            // ~0.08 pawn.
+            // Scores are internal units: 270 = one displayed pawn (WDL_A in
+            // chess-uci's handler.rs), so "decided" means ~4.9 and ~2.9 displayed
+            // pawns, the swing gates 40 / 60 are ~0.15 / ~0.22 pawn, and "unclear"
+            // means within ~0.19 / ~0.33 pawn of equal with a swing of ~0.13 /
+            // ~0.09 pawn.
             let eval_abs = best_score.0.saturating_abs() as u64;
             let eval_adjust: i64 = if best_score.is_mate() {
                 // Once mate is visible, prioritize conversion speed.
