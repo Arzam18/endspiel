@@ -3843,15 +3843,16 @@ fn sanitize_pv(board: &Board, pv: &[Move]) -> Vec<Move> {
             break;
         }
         b.make_move(m);
+        result.push(m);
         // Stop at a forced draw: the game ends here regardless of what the
-        // rest of the PV claims. Drop the draw-creating move as well — GUIs
-        // (fastchess) warn when the PV includes the move that triggers the
-        // threefold or 50-move rule, because nothing after it can legally
-        // be played.
+        // rest of the PV claims. Keep the draw-creating move itself — GUIs
+        // (fastchess) only warn when the PV continues after the threefold or
+        // 50-move rule, and dropping it left a root move that draws with an
+        // empty PV: the `info` line had no `pv`, so GUIs kept showing an
+        // older depth's line while `bestmove` played the draw.
         if is_fifty_move_draw(&b) || b.is_repetition() {
             break;
         }
-        result.push(m);
     }
     result
 }
@@ -4107,6 +4108,33 @@ mod tests {
             "should see the 50-move draw, got {}",
             result.score
         );
+    }
+
+    #[test]
+    fn pv_ends_with_the_move_that_draws() {
+        let mut board = Board::starting_position();
+        let play = |board: &Board, uci: &str| {
+            let parsed = Move::from_uci(uci).unwrap();
+            chess_core::generate_legal_moves(board)
+                .as_slice()
+                .iter()
+                .copied()
+                .find(|m| m.from_sq() == parsed.from_sq() && m.to_sq() == parsed.to_sq())
+                .unwrap()
+        };
+        for uci in [
+            "g1f3", "g8f6", "f3g1", "f6g8", "g1f3", "g8f6", "f3g1", "f6g8",
+        ] {
+            let m = play(&board, uci);
+            board.make_move(m);
+        }
+        // 9.Nf3 reaches the position after 1.Nf3 a third time: the PV is that
+        // move alone, never empty and never continued past the draw.
+        let nf3 = play(&board, "g1f3");
+        let mut after = board.clone();
+        after.make_move(nf3);
+        let nf6 = play(&after, "g8f6");
+        assert_eq!(sanitize_pv(&board, &[nf3, nf6]), vec![nf3]);
     }
 
     #[test]
