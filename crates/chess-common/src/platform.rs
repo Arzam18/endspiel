@@ -125,7 +125,9 @@ fn available_ram_mb() -> Option<u64> {
 /// `(total_mb, available_mb)` from sysinfo. Either may be 0 if unavailable.
 fn mem_total_avail_mb() -> (u64, u64) {
     use sysinfo::System;
-    let mut sys = System::new();
+    let Ok(mut sys) = System::new() else {
+        return (0, 0);
+    };
     sys.refresh_memory();
     const MB: u64 = 1024 * 1024;
     (sys.total_memory() / MB, sys.available_memory() / MB)
@@ -134,7 +136,7 @@ fn mem_total_avail_mb() -> (u64, u64) {
 /// First CPU brand string reported by sysinfo, for logging.
 fn cpu_brand() -> Option<String> {
     use sysinfo::System;
-    let mut sys = System::new();
+    let mut sys = System::new().ok()?;
     sys.refresh_cpu_list(sysinfo::CpuRefreshKind::nothing());
     let brand = sys.cpus().first()?.brand().trim().to_string();
     (!brand.is_empty()).then_some(brand)

@@ -16,7 +16,7 @@ chess-nnue = { path = "crates/chess-nnue" }
 chess-uci = { path = "crates/chess-uci" }
 log = "0.4.34"
 env_logger = "0.11.11"
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"] }
+sysinfo = { version = "0.40.0", default-features = false, features = ["system"] }
 thiserror = "2.0.21"
 
 [package]
