@@ -134,21 +134,29 @@ pub struct SharedTT {
 impl SharedTT {
     /// Create a new transposition table with the given size in MB.
     pub fn new(size_mb: usize) -> Self {
+        Self::try_new(size_mb)
+            .unwrap_or_else(|e| panic!("transposition table of {size_mb} MB: {e}"))
+    }
+
+    /// Like [`SharedTT::new`], but reports a failed allocation instead of
+    /// aborting the process.
+    pub fn try_new(size_mb: usize) -> Result<Self, std::collections::TryReserveError> {
         let entry_size = 16; // two u64
-        let num_entries = (size_mb * 1024 * 1024) / entry_size;
+        let num_entries = size_mb.saturating_mul(1024 * 1024) / entry_size;
         let num_entries = num_entries.next_power_of_two() / 2;
         let num_entries = num_entries.max(1024);
 
-        let mut entries = Vec::with_capacity(num_entries);
+        let mut entries = Vec::new();
+        entries.try_reserve_exact(num_entries)?;
         for _ in 0..num_entries {
             entries.push(AtomicTTEntry::new());
         }
 
-        Self {
+        Ok(Self {
             entries: entries.into_boxed_slice(),
             mask: num_entries - 1,
             generation: AtomicU8::new(0),
-        }
+        })
     }
 
     /// Probe the TT for the given hash. Returns `None` on miss or corrupted read.
@@ -255,6 +263,13 @@ impl SharedTT {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oversized_table_is_an_error_not_an_abort() {
+        // 2^63 bytes: rejected by the capacity check, nothing is allocated.
+        assert!(SharedTT::try_new(usize::MAX).is_err());
+        assert!(SharedTT::try_new(1).is_ok());
+    }
 
     #[test]
     fn test_pack_unpack_roundtrip() {

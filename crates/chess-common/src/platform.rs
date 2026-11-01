@@ -32,6 +32,8 @@ const HASH_DIVISOR: u64 = 16;
 const HASH_MIN_MB: usize = 16;
 /// Per-thread transposition-table budget (MB) — see [`default_hash_mb`].
 const HASH_MB_PER_THREAD: usize = 128;
+/// Largest `Hash` the UCI option accepts (MB), whatever the machine.
+pub const HASH_MAX_MB: usize = 131072;
 
 /// Cores whose max frequency is at least this percentage of the fastest core
 /// are treated as "performance" cores. Tuned to group the prime + big tiers
@@ -72,6 +74,23 @@ fn fallback_threads() -> usize {
 /// per-thread memory multiplier.
 pub fn default_hash_mb(threads: usize) -> usize {
     hash_for(threads, available_ram_mb())
+}
+
+/// Largest transposition table this machine can hold (MB): half of total RAM,
+/// at most [`HASH_MAX_MB`] (and that when RAM can't be read). The table is
+/// zero-filled at allocation, so a size near or above physical RAM would get
+/// the process — or, through the kernel's OOM killer, other processes on
+/// the host — killed rather than fail cleanly.
+pub fn max_hash_mb() -> usize {
+    let total = mem_total_avail_mb().0;
+    hash_cap_for((total > 0).then_some(total))
+}
+
+/// Pure: the [`max_hash_mb`] cap for a given total RAM.
+fn hash_cap_for(total_mb: Option<u64>) -> usize {
+    total_mb
+        .map_or(HASH_MAX_MB, |mb| (mb / 2) as usize)
+        .clamp(1, HASH_MAX_MB)
 }
 
 /// Pure: combine the per-thread throughput budget with the RAM ceiling.
@@ -180,6 +199,15 @@ fn performance_cores() -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hash_cap_is_half_of_total_ram() {
+        assert_eq!(hash_cap_for(Some(62_000)), 31_000); // 64 GB box
+        assert_eq!(hash_cap_for(Some(8_000)), 4_000); // Pi 5 8 GB
+        assert_eq!(hash_cap_for(Some(1_000_000)), HASH_MAX_MB);
+        assert_eq!(hash_cap_for(Some(1)), 1);
+        assert_eq!(hash_cap_for(None), HASH_MAX_MB);
+    }
 
     #[test]
     fn hash_caps_by_ram_on_low_memory_devices() {

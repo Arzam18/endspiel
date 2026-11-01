@@ -265,7 +265,7 @@ impl Engine {
     /// is known up front — avoids allocating and immediately discarding the
     /// default 4 GB transposition table.
     pub fn with_hash(hash_mb: usize) -> Self {
-        let hash_mb = hash_mb.clamp(1, 131072);
+        let hash_mb = hash_mb.clamp(1, chess_common::platform::max_hash_mb());
         // Device-adaptive default: performance-core count on Android,
         // min(available_parallelism, 16) elsewhere.
         // Can be overridden via UCI "setoption name Threads value N".
@@ -293,13 +293,23 @@ impl Engine {
         Arc::clone(&self.stop)
     }
 
-    /// Set the transposition table size in MB.
-    pub fn set_hash_mb(&mut self, mb: usize) {
-        let mb = mb.clamp(1, 131072);
+    /// Set the transposition table size in MB, capped at
+    /// [`chess_common::platform::max_hash_mb`] (half of RAM). Returns the size
+    /// in effect; if the new table cannot be allocated, the old one is kept
+    /// and the error says so.
+    pub fn set_hash_mb(&mut self, mb: usize) -> Result<usize, String> {
+        let mb = mb.clamp(1, chess_common::platform::max_hash_mb());
         if mb != self.hash_mb {
+            let tt = SharedTT::try_new(mb).map_err(|e| {
+                format!(
+                    "cannot allocate a {mb} MB hash table ({e}), keeping {} MB",
+                    self.hash_mb
+                )
+            })?;
             self.hash_mb = mb;
-            self.tt = Arc::new(SharedTT::new(mb));
+            self.tt = Arc::new(tt);
         }
+        Ok(self.hash_mb)
     }
 
     /// Get the current hash size in MB.

@@ -247,7 +247,7 @@ impl UciHandler {
             opt_type: UciOptionType::Spin {
                 default: chess_common::platform::default_hash_mb(self.engine.num_threads()) as i64,
                 min: 1,
-                max: 131072,
+                max: chess_common::platform::HASH_MAX_MB as i64,
             },
         }));
         send_response(&UciResponse::Option(UciOptionDef {
@@ -384,7 +384,7 @@ impl UciHandler {
             // allocating it × concurrency at startup).
             if !self.hash_explicitly_set {
                 let mb = chess_common::platform::default_hash_mb(self.engine.num_threads());
-                self.engine.set_hash_mb(mb);
+                self.set_hash(mb);
                 log::info!(
                     "Hash defaulting to {mb} MB for {} threads (no setoption received)",
                     self.engine.num_threads()
@@ -802,6 +802,26 @@ impl UciHandler {
         }
     }
 
+    /// Resize the hash table, telling the GUI when the size was capped at half
+    /// of RAM or the table could not be allocated (the old one is kept).
+    fn set_hash(&mut self, mb: usize) {
+        let message = match self.engine.set_hash_mb(mb) {
+            Ok(actual) if actual < mb => {
+                format!("Hash capped at {actual} MB (half of RAM), {mb} MB requested")
+            }
+            Ok(actual) => {
+                log::info!("Hash set to {actual} MB");
+                return;
+            }
+            Err(e) => format!("Hash ERROR: {e}"),
+        };
+        log::warn!("{message}");
+        send_response(&UciResponse::Info(UciInfo {
+            string: Some(message),
+            ..UciInfo::default()
+        }));
+    }
+
     fn wait_for_search(&mut self) {
         if let Some(handle) = self.search_thread.take()
             && let Err(e) = handle.join()
@@ -818,8 +838,7 @@ impl UciHandler {
                     && let Ok(mb) = v.trim().parse::<usize>()
                 {
                     self.hash_explicitly_set = true;
-                    self.engine.set_hash_mb(mb);
-                    log::info!("Hash set to {} MB", self.engine.hash_mb());
+                    self.set_hash(mb);
                 }
             }
             "threads" => {
