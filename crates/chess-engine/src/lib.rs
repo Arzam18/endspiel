@@ -48,9 +48,9 @@ pub struct SearchParams {
     pub move_overhead_ms: u64,
     /// Time management scaling factor (percentage). 100 = normal.
     pub slow_mover: u64,
-    /// Contempt factor in centipawns. A positive value makes the engine
-    /// slightly prefer avoiding draws (scored as -contempt from the perspective
-    /// of the side to move at the root). 0 = neutral.
+    /// Contempt in internal eval units. A positive value makes the engine
+    /// avoid draws by the rules (repetition, 50-move rule, stalemate, dead
+    /// position), scored as -contempt for the root side. 0 = neutral (default).
     pub contempt: i32,
     /// Singular extension mode.
     /// 0 = off, 1 = conservative (default), 2 = aggressive.
@@ -193,7 +193,7 @@ impl Default for SearchParams {
             use_nnue: true,
             move_overhead_ms: 20,
             slow_mover: 100,
-            contempt: 20,
+            contempt: 0,
             singular_ext_mode: 1,
             multi_pv: 1,
             tune: TuneParams::default(),
@@ -278,7 +278,7 @@ impl Engine {
             num_threads,
             move_overhead_ms: 20,
             slow_mover: 100,
-            contempt: 20,
+            contempt: 0,
             singular_ext_mode: 1,
             nnue_net: NnueNetwork::embedded(),
             use_nnue: NnueNetwork::embedded().is_trained(),

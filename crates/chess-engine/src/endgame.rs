@@ -18,10 +18,29 @@
 //! for that exact material; everything else returns `None`. The scores stay
 //! far below the tablebase (28 000) and mate (29 000+) bands.
 
-use chess_common::{Board, Color, PieceKind, Square};
+use chess_common::{Bitboard, Board, Color, PieceKind, Square};
 
 /// Base value of a known, forced win (the search still has to find the mate).
 const KNOWN_WIN: i32 = 2_000;
+
+const LIGHT_SQUARES: Bitboard = Bitboard(0x55AA_55AA_55AA_55AA);
+
+/// A dead position (FIDE 5.2.2): no sequence of legal moves can end in mate,
+/// so the game is drawn whatever is played — K vs K, K+minor vs K, and any
+/// number of bishops that all stand on squares of one colour. The search
+/// treats it as a terminal draw.
+pub fn is_dead_position(board: &Board) -> bool {
+    let both = |k: PieceKind| board.pieces[0][k.index()].0 | board.pieces[1][k.index()].0;
+    if both(PieceKind::Pawn) | both(PieceKind::Rook) | both(PieceKind::Queen) != 0 {
+        return false;
+    }
+    let knights = both(PieceKind::Knight);
+    let bishops = both(PieceKind::Bishop);
+    if (knights | bishops).count_ones() <= 1 {
+        return true;
+    }
+    knights == 0 && (bishops & LIGHT_SQUARES.0 == 0 || bishops & !LIGHT_SQUARES.0 == 0)
+}
 
 /// Specialized evaluation from the side-to-move perspective, or `None` when the
 /// material has no rule. Cheap: bails out on the piece count first.
@@ -33,8 +52,12 @@ pub fn evaluate(board: &Board) -> Option<i32> {
     let white = Material::of(board, Color::White);
     let black = Material::of(board, Color::Black);
 
-    // Dead draws: no pawns or majors, and neither side can force mate
-    // (K vs K, K+minor vs K, K+minor vs K+minor, K+N+N vs K).
+    // Drawn material: no pawns or majors, and neither side can force mate
+    // (K+minor vs K+minor, K+N+N vs K). A theoretical draw, not one by the
+    // rules (a mate is still possible if the defender errs), so it scores 0
+    // and stays an evaluation. Below the root the search stops at the dead
+    // positions among these (K vs K, K+minor vs K, same-coloured bishops)
+    // before it evaluates them, see `is_dead_position`.
     if white.pawns + black.pawns == 0
         && white.majors() + black.majors() == 0
         && white.can_not_mate()
@@ -153,7 +176,7 @@ fn kqkr(board: &Board, strong: Color) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use super::evaluate;
+    use super::{evaluate, is_dead_position};
     use chess_common::Board;
 
     fn eval(fen: &str) -> Option<i32> {
@@ -168,6 +191,21 @@ mod tests {
         assert_eq!(eval("8/8/4k3/3b4/8/2N5/8/4K3 w - - 0 1"), Some(0)); // KNvKB
         assert_eq!(eval("8/8/4k3/8/8/2BB4/8/4K3 w - - 0 1"), None); // KBBvK wins
         assert_eq!(eval("8/8/4k3/8/8/2P5/8/4K3 w - - 0 1"), None); // pawns: net
+    }
+
+    #[test]
+    fn dead_positions_are_only_those_without_any_mate() {
+        let dead = |fen: &str| is_dead_position(&Board::from_fen(fen).expect("valid FEN"));
+        assert!(dead("8/8/4k3/8/8/8/8/4K3 w - - 0 1")); // KvK
+        assert!(dead("8/8/4k3/8/8/2B5/8/4K3 w - - 0 1")); // KBvK
+        assert!(dead("8/8/4k3/8/8/2N5/8/4K3 b - - 0 1")); // KNvK
+        assert!(dead("8/8/4k3/8/3b4/2B5/8/4K3 w - - 0 1")); // KBvKB, c3 + d4 both dark
+        assert!(dead("8/8/4k3/8/3b4/2B5/1B6/4K3 w - - 0 1")); // KBBvKB, all dark
+        assert!(!dead("8/8/4k3/3b4/8/2B5/8/4K3 w - - 0 1")); // KBvKB, c3 dark + d5 light
+        assert!(!dead("8/8/4k3/3b4/8/2N5/8/4K3 w - - 0 1")); // KNvKB
+        assert!(!dead("8/8/4k3/8/8/2NN4/8/4K3 w - - 0 1")); // KNNvK: helpmate exists
+        assert!(!dead("8/8/4k3/8/8/2P5/8/4K3 w - - 0 1")); // KPvK
+        assert!(!dead("8/8/4k3/8/8/2R5/8/4K3 w - - 0 1")); // KRvK
     }
 
     #[test]

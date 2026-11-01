@@ -2447,6 +2447,11 @@ fn alpha_beta(
         if board.is_repetition() {
             return draw_score(state, ply);
         }
+        // Dead position (K vs K, K+minor vs K, same-coloured bishops): no mate
+        // is possible, so it is a draw whatever follows.
+        if crate::endgame::is_dead_position(board) {
+            return draw_score(state, ply);
+        }
     }
 
     // -------------------------------------------------------------------
@@ -3295,6 +3300,11 @@ fn quiescence(
         if board.is_repetition() {
             return draw_score(state, ply);
         }
+        // Dead position (K vs K, K+minor vs K, same-coloured bishops): no mate
+        // is possible, so it is a draw whatever follows.
+        if crate::endgame::is_dead_position(board) {
+            return draw_score(state, ply);
+        }
     }
 
     state.nodes += 1;
@@ -3699,7 +3709,7 @@ fn evaluate_for_side(
     ply: u8,
     cached: Option<i32>,
 ) -> (Option<i32>, i32) {
-    // Hand-crafted endings (K+B+N vs K, K+Q vs K+R, dead draws) replace the net:
+    // Hand-crafted endings (K+B+N vs K, K+Q vs K+R, drawn material) replace the net:
     // it has no gradient there without tablebases (see endgame.rs).
     if let Some(eval) = crate::endgame::evaluate(board) {
         return (Some(eval), eval);
@@ -5227,6 +5237,22 @@ mod tests {
             "Black should be clearly winning, got score {}",
             result.score
         );
+    }
+
+    #[test]
+    fn dead_position_is_a_terminal_draw() {
+        // KB vs KB, both bishops on dark squares (c3, d4): every child is a dead
+        // position, so the search stops there and scores the draw with contempt.
+        let fen = "8/8/4k3/8/3b4/2B5/8/4K3 w - - 0 1";
+        let result = search_with_contempt(fen, 12, 20);
+        assert_eq!(result.score.0, -20, "got {}", result.score);
+        assert!(!result.best_move.is_null());
+        assert!(
+            result.nodes < 2_000,
+            "children must be terminal, searched {} nodes",
+            result.nodes
+        );
+        assert_eq!(search_with_contempt(fen, 12, 0).score.0, 0);
     }
 
     /// Contempt: draws are scored as -contempt from the root side's perspective,

@@ -171,7 +171,7 @@ sustained engine load the SoC will thermally throttle without a fan.
 | `Move Overhead` | 20 | Time safety margin in ms |
 | `Slow Mover` | 100 | Time usage scaling (%) — >100 thinks longer, <100 plays faster |
 | `Ponder` | false | Think on the opponent's time; the GUI toggles this and drives `go ponder` / `ponderhit` |
-| `Contempt` | 20 | Draw avoidance, in internal eval units (270 = one displayed pawn, so 20 ≈ 7 cp) |
+| `Contempt` | 0 | Draw avoidance for draws by the rules (repetition, 50-move rule, stalemate, dead position), in internal eval units (270 = one displayed pawn) |
 | `EvalFile` | *(embedded)* | Path to an external `.nnue` / `quantised.bin` net |
 | `BookFile` | *(disabled)* | Path to an opening book: Polyglot `.bin`, EPD `.epd`, or PGN `.pgn` (auto-detected by extension) |
 | `SyzygyPath` | *(disabled)* | Path to Syzygy tablebase directory |
